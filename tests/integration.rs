@@ -458,3 +458,58 @@ fn conditional_reducer_if_else_works() {
     assert!(did_change);
     assert_eq!(store.state().value, 42);
 }
+
+// ============================================================================
+// App double-buffering tests
+// ============================================================================
+
+use reducto::App;
+
+#[test]
+fn app_dispatch_returns_old_and_new_state() {
+    let view = CounterView::new();
+    let mut app: App<TestState, TestAction, TestReducer, _> = App::new(view, TestState { count: 5 });
+
+    let result = app.dispatch(TestAction::Increment);
+
+    assert!(result.changed);
+    assert_eq!(result.old.count, 5);
+    assert_eq!(result.new.count, 6);
+    assert_eq!(app.state().count, 6);
+}
+
+#[test]
+fn app_dispatch_unchanged_preserves_state() {
+    let view = CounterView::new();
+    let mut app: App<TestState, TestAction, TestReducer, _> = App::new(view, TestState { count: 10 });
+
+    // Setting to same value returns unchanged
+    let result = app.dispatch(TestAction::Set(10));
+
+    assert!(!result.changed);
+    assert_eq!(result.old.count, 10);
+    assert_eq!(result.new.count, 10);
+}
+
+#[test]
+fn app_dispatch_double_buffer_alternates() {
+    let view = CounterView::new();
+    let mut app: App<TestState, TestAction, TestReducer, _> = App::new(view, TestState { count: 0 });
+
+    // First dispatch: old=0, new=1
+    let r1 = app.dispatch(TestAction::Increment);
+    assert_eq!(r1.old.count, 0);
+    assert_eq!(r1.new.count, 1);
+
+    // Second dispatch: old=1, new=2
+    let r2 = app.dispatch(TestAction::Increment);
+    assert_eq!(r2.old.count, 1);
+    assert_eq!(r2.new.count, 2);
+
+    // Third dispatch: old=2, new=3
+    let r3 = app.dispatch(TestAction::Increment);
+    assert_eq!(r3.old.count, 2);
+    assert_eq!(r3.new.count, 3);
+
+    assert_eq!(app.state().count, 3);
+}

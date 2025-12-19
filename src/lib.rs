@@ -40,6 +40,7 @@
 
 #![no_std]
 
+use core::marker::PhantomData;
 use heapless::String;
 
 /// Result of a reducer - indicates whether state changed.
@@ -440,6 +441,116 @@ pub trait Application {
     /// Override this for periodic tasks like animation updates
     /// or watchdog feeds. Default implementation does nothing.
     fn tick(&mut self) {}
+}
+
+/// Result of a dispatch operation with access to old and new state.
+///
+/// This enables side effects that need to detect state transitions
+/// by comparing old and new state.
+pub struct Dispatch<'a, S> {
+    /// State before the action was dispatched
+    pub old: &'a S,
+    /// State after the action was dispatched
+    pub new: &'a S,
+    /// Whether the reducer reported a state change
+    pub changed: bool,
+}
+
+/// An application that owns its store and view.
+///
+/// This is the recommended way to structure an application. The `App` owns
+/// the state store and view, providing a clean `dispatch()` API.
+///
+/// Uses double-buffering for state, allowing side effects to compare
+/// old and new state without cloning.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let mut app = App::<AppState, Action, AppReducer, _>::new(view, AppState::new());
+/// app.dispatch(Action::Boot);
+///
+/// loop {
+///     let action = channel.receive().await;
+///     let result = app.dispatch(action);
+///     if result.changed {
+///         // Can compare result.old and result.new for side effects
+///     }
+/// }
+/// ```
+pub struct App<S, A, R, V>
+where
+    S: Default + Clone,
+    R: Reducer<State = S, Action = A>,
+    V: View<State = S>,
+{
+    /// Double-buffered state: [0] = current, [1] = previous
+    states: [S; 2],
+    /// Index of current state (0 or 1)
+    current: usize,
+    view: V,
+    _reducer: PhantomData<R>,
+    _action: PhantomData<A>,
+}
+
+impl<S, A, R, V> App<S, A, R, V>
+where
+    S: Default + Clone,
+    R: Reducer<State = S, Action = A>,
+    V: View<State = S>,
+{
+    /// Create a new application with the given view and initial state.
+    pub fn new(view: V, initial_state: S) -> Self {
+        Self {
+            states: [initial_state, S::default()],
+            current: 0,
+            view,
+            _reducer: PhantomData,
+            _action: PhantomData,
+        }
+    }
+
+    /// Dispatch an action through the reducer, rendering if state changed.
+    ///
+    /// Returns a `Dispatch` struct with references to old and new state,
+    /// enabling side effects that need to detect state transitions.
+    ///
+    /// The view is automatically rendered if state changed.
+    pub fn dispatch(&mut self, action: A) -> Dispatch<'_, S> {
+        let old_idx = self.current;
+        let new_idx = 1 - old_idx;
+
+        // Clone current state to new buffer, keep original for comparison
+        self.states[new_idx] = self.states[old_idx].clone();
+
+        // Take from new buffer for reducer (old buffer preserved)
+        let state_for_reducer = core::mem::take(&mut self.states[new_idx]);
+        let (new_state, changed) = R::reduce(state_for_reducer, action).into_parts();
+        self.states[new_idx] = new_state;
+
+        // Swap current pointer
+        self.current = new_idx;
+
+        if changed {
+            self.view.render(&self.states[new_idx]);
+        }
+
+        Dispatch {
+            old: &self.states[old_idx],
+            new: &self.states[new_idx],
+            changed,
+        }
+    }
+
+    /// Get a reference to the current state.
+    pub fn state(&self) -> &S {
+        &self.states[self.current]
+    }
+
+    /// Get a mutable reference to the view.
+    pub fn view(&mut self) -> &mut V {
+        &mut self.view
+    }
 }
 
 /// Generate a Reducer implementation from a pattern-matching DSL.

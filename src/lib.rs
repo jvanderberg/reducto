@@ -12,10 +12,14 @@
 //! ## Example
 //!
 //! ```rust
-//! use reducto::{Reducer, Store};
+//! use reducto::{Reducer, Store, Versioned};
 //!
 //! #[derive(Clone, PartialEq, Default)]
-//! struct AppState { count: i32 }
+//! struct AppState { version: u32, count: i32 }
+//!
+//! impl Versioned for AppState {
+//!     fn version(&self) -> u32 { self.version }
+//! }
 //!
 //! enum Action { Increment, Decrement }
 //!
@@ -25,11 +29,12 @@
 //!     type State = AppState;
 //!     type Action = Action;
 //!
-//!     fn reduce(state: Self::State, action: Self::Action) -> Self::State {
+//!     fn reduce(mut state: Self::State, action: Self::Action) -> Self::State {
 //!         match action {
-//!             Action::Increment => AppState { count: state.count + 1 },
-//!             Action::Decrement => AppState { count: state.count - 1 },
+//!             Action::Increment => { state.count += 1; state.version += 1; }
+//!             Action::Decrement => { state.count -= 1; state.version += 1; }
 //!         }
+//!         state
 //!     }
 //! }
 //!
@@ -41,6 +46,14 @@
 #![no_std]
 
 use heapless::String;
+
+/// Trait for state types that track their version.
+///
+/// Implement this to enable zero-copy change detection. The reducer
+/// should increment the version whenever it modifies state.
+pub trait Versioned {
+    fn version(&self) -> u32;
+}
 
 /// Pure state transformation: (State, Action) -> State
 ///
@@ -89,10 +102,7 @@ pub struct Store<S, A, const N: usize = 8> {
     queue: heapless::Deque<A, N>,
 }
 
-impl<S, A, const N: usize> Store<S, A, N>
-where
-    S: Clone + PartialEq,
-{
+impl<S, A, const N: usize> Store<S, A, N> {
     /// Create a new store with the given initial state and empty action queue.
     pub fn new(initial: S) -> Self {
         Self {
@@ -124,15 +134,19 @@ where
 
     /// Dispatch a single action through the reducer immediately.
     ///
-    /// Returns `true` if the state changed, `false` otherwise.
+    /// Returns `true` if the state changed (based on version field).
     /// Prefer `process_queue_with_callback()` for normal operation.
+    ///
+    /// Note: State is moved to reducer (zero-copy). Rust's ownership
+    /// system guarantees immutability - no cloning needed.
     pub fn dispatch<R>(&mut self, action: A) -> bool
     where
         R: Reducer<State = S, Action = A>,
+        S: Default + Versioned,
     {
-        let old = self.state.clone();
-        self.state = R::reduce(self.state.clone(), action);
-        self.state != old
+        let old_version = self.state.version();
+        self.state = R::reduce(core::mem::take(&mut self.state), action);
+        self.state.version() != old_version
     }
 
     /// Process all queued actions, returning the number of state changes.
@@ -142,10 +156,13 @@ where
     pub fn process_queue<R>(&mut self) -> usize
     where
         R: Reducer<State = S, Action = A>,
+        S: Default + Versioned,
     {
         let mut changes = 0;
         while let Some(action) = self.queue.pop_front() {
-            if self.dispatch::<R>(action) {
+            let old_version = self.state.version();
+            self.state = R::reduce(core::mem::take(&mut self.state), action);
+            if self.state.version() != old_version {
                 changes += 1;
             }
         }
@@ -157,24 +174,27 @@ where
     /// This is the primary method for the main loop. It drains the queue,
     /// dispatches each action, and calls the callback whenever state changes.
     ///
+    /// Zero-copy: state is moved to reducer, not cloned. Rust's ownership
+    /// guarantees no external mutation. Version-based change detection.
+    ///
     /// # Example
     ///
     /// ```rust,ignore
-    /// store.process_queue_with_callback::<MyReducer, _>(|old, new| {
-    ///     // Render, update LEDs, etc.
+    /// store.process_queue_with_callback::<MyReducer, _>(|new| {
     ///     display.render(new);
     /// });
     /// ```
     pub fn process_queue_with_callback<R, F>(&mut self, mut on_change: F)
     where
         R: Reducer<State = S, Action = A>,
-        F: FnMut(&S, &S),
+        S: Default + Versioned,
+        F: FnMut(&S),
     {
         while let Some(action) = self.queue.pop_front() {
-            let old = self.state.clone();
-            self.state = R::reduce(self.state.clone(), action);
-            if self.state != old {
-                on_change(&old, &self.state);
+            let old_version = self.state.version();
+            self.state = R::reduce(core::mem::take(&mut self.state), action);
+            if self.state.version() != old_version {
+                on_change(&self.state);
             }
         }
     }
@@ -265,11 +285,8 @@ impl<const N: usize> Default for TextView<N> {
 /// Actions are queued via `Store::enqueue()` from ISRs or event handlers.
 /// The framework drains the queue automatically.
 ///
-/// This design is bullet-proof because:
-/// - You can't forget to check for state changes (framework does it)
-/// - Side effects are isolated to `on_state_change`
-/// - The order is enforced by the framework
-/// - ISRs just enqueue, main loop processes
+/// Zero-copy design: state is moved to reducer (not cloned). Rust's ownership
+/// guarantees immutability. Change detection via version field.
 ///
 /// # Example
 ///
@@ -281,8 +298,8 @@ impl<const N: usize> Default for TextView<N> {
 ///     type Action = Action;
 ///     type Reducer = AppReducer;
 ///
-///     fn on_state_change(&mut self, _old: &AppState, new: &AppState) {
-///         self.display.render(new);
+///     fn on_state_change(&mut self, state: &AppState) {
+///         self.display.render(state);
 ///     }
 /// }
 ///
@@ -291,7 +308,7 @@ impl<const N: usize> Default for TextView<N> {
 /// ```
 pub trait Application {
     /// The state type for this application
-    type State: Clone + PartialEq;
+    type State: Default + Versioned;
     /// The action type for this application
     type Action;
     /// The reducer that handles state transitions
@@ -299,9 +316,9 @@ pub trait Application {
 
     /// Execute side effects when state changes.
     ///
-    /// Called ONLY when state actually changed after dispatch.
+    /// Called ONLY when state version changed after dispatch.
     /// This is where you should render to displays, update LEDs, etc.
-    fn on_state_change(&mut self, old: &Self::State, new: &Self::State);
+    fn on_state_change(&mut self, state: &Self::State);
 
     /// Called every loop iteration regardless of state changes.
     ///
@@ -330,10 +347,14 @@ pub trait Application {
 /// # Example
 ///
 /// ```rust
-/// use reducto::{Reducer, Store};
+/// use reducto::{Reducer, Store, Versioned};
 ///
 /// #[derive(Clone, PartialEq, Default)]
-/// struct Counter { count: i32 }
+/// struct Counter { version: u32, count: i32 }
+///
+/// impl Versioned for Counter {
+///     fn version(&self) -> u32 { self.version }
+/// }
 ///
 /// #[derive(Clone)]
 /// enum CounterAction {
@@ -344,9 +365,9 @@ pub trait Application {
 ///
 /// reducto::reducer! {
 ///     CounterReducer for Counter, CounterAction {
-///         CounterAction::Increment => |state| Counter { count: state.count + 1 },
-///         CounterAction::Decrement => |state| Counter { count: state.count - 1 },
-///         CounterAction::Set(n) => |_state| Counter { count: n },
+///         CounterAction::Increment => |state| Counter { version: state.version + 1, count: state.count + 1 },
+///         CounterAction::Decrement => |state| Counter { version: state.version + 1, count: state.count - 1 },
+///         CounterAction::Set(n) => |_state| Counter { version: 1, count: n },
 ///     }
 /// }
 ///
@@ -409,8 +430,8 @@ pub fn run_loop<A: Application, const N: usize>(
 ) -> ! {
     loop {
         app.tick();
-        store.process_queue_with_callback::<A::Reducer, _>(|old, new| {
-            app.on_state_change(old, new);
+        store.process_queue_with_callback::<A::Reducer, _>(|state| {
+            app.on_state_change(state);
         });
     }
 }

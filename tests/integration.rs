@@ -3,19 +3,12 @@
 //! TDD: Write failing tests first (RED), then implement to pass (GREEN)
 
 use core::fmt::Write;
-use reducto::{Application, Reducer, Store, TextView, Versioned, View};
+use reducto::{Application, Outcome, Reducer, Store, TextView, View, unchanged};
 
 // Test state and action types
 #[derive(Clone, PartialEq, Debug, Default)]
 struct TestState {
-    version: u32,
     count: i32,
-}
-
-impl Versioned for TestState {
-    fn version(&self) -> u32 {
-        self.version
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -32,30 +25,28 @@ impl Reducer for TestReducer {
     type State = TestState;
     type Action = TestAction;
 
-    fn reduce(mut state: Self::State, action: Self::Action) -> Self::State {
+    fn reduce(mut state: Self::State, action: Self::Action) -> Outcome<Self::State> {
         match action {
             TestAction::Increment => {
                 state.count += 1;
-                state.version += 1;
+                Outcome::changed(state)
             }
             TestAction::Decrement => {
                 state.count -= 1;
-                state.version += 1;
+                Outcome::changed(state)
             }
+            TestAction::Set(val) if val == state.count => unchanged(state),
             TestAction::Set(val) => {
-                if state.count != val {
-                    state.count = val;
-                    state.version += 1;
-                }
+                state.count = val;
+                Outcome::changed(state)
             }
         }
-        state
     }
 }
 
 #[test]
 fn store_new_creates_with_initial_state() {
-    let store: Store<TestState, TestAction, 8> = Store::new(TestState { version: 0, count: 42 });
+    let store: Store<TestState, TestAction, 8> = Store::new(TestState { count: 42 });
     assert_eq!(store.state().count, 42);
 }
 
@@ -71,7 +62,7 @@ fn store_dispatch_updates_state() {
 
 #[test]
 fn store_dispatch_returns_false_when_state_unchanged() {
-    let mut store: Store<TestState, TestAction, 8> = Store::new(TestState { version: 0, count: 5 });
+    let mut store: Store<TestState, TestAction, 8> = Store::new(TestState { count: 5 });
 
     // Setting to same value should return false
     let changed = store.dispatch::<TestReducer>(TestAction::Set(5));
@@ -118,16 +109,19 @@ fn store_process_queue_dispatches_all_actions() {
 
 #[test]
 fn reducer_handles_all_variants() {
-    let state = TestState { version: 0, count: 10 };
+    let state = TestState { count: 10 };
 
-    let inc = TestReducer::reduce(state.clone(), TestAction::Increment);
+    let (inc, changed) = TestReducer::reduce(state.clone(), TestAction::Increment).into_parts();
     assert_eq!(inc.count, 11);
+    assert!(changed);
 
-    let dec = TestReducer::reduce(state.clone(), TestAction::Decrement);
+    let (dec, changed) = TestReducer::reduce(state.clone(), TestAction::Decrement).into_parts();
     assert_eq!(dec.count, 9);
+    assert!(changed);
 
-    let set = TestReducer::reduce(state, TestAction::Set(100));
+    let (set, changed) = TestReducer::reduce(state, TestAction::Set(100)).into_parts();
     assert_eq!(set.count, 100);
+    assert!(changed);
 }
 
 // ============================================================================
@@ -154,7 +148,7 @@ fn text_view_can_be_created() {
 
 #[test]
 fn text_view_renders_state() {
-    let state = TestState { version: 0, count: 42 };
+    let state = TestState { count: 42 };
     let mut text_view = TextView::<128>::new();
     let mut counter_view = CounterView;
 
@@ -165,7 +159,7 @@ fn text_view_renders_state() {
 
 #[test]
 fn text_view_contains_works() {
-    let state = TestState { version: 0, count: 99 };
+    let state = TestState { count: 99 };
     let mut text_view = TextView::<128>::new();
     let mut counter_view = CounterView;
 
@@ -285,15 +279,8 @@ fn application_processes_multiple_queued_actions() {
 // State for macro-generated reducer
 #[derive(Clone, PartialEq, Debug, Default)]
 struct MacroState {
-    version: u32,
     value: i32,
     name: &'static str,
-}
-
-impl Versioned for MacroState {
-    fn version(&self) -> u32 {
-        self.version
-    }
 }
 
 // Actions for macro-generated reducer
@@ -308,29 +295,29 @@ enum MacroAction {
 // Generate reducer using macro
 reducto::reducer! {
     MacroReducer for MacroState, MacroAction {
-        MacroAction::Add(n) => |state| MacroState { value: state.value + n, version: state.version + 1, ..state },
-        MacroAction::Subtract(n) => |state| MacroState { value: state.value - n, version: state.version + 1, ..state },
-        MacroAction::SetName(s) => |state| MacroState { name: s, version: state.version + 1, ..state },
+        MacroAction::Add(n) => |state| MacroState { value: state.value + n, ..state },
+        MacroAction::Subtract(n) => |state| MacroState { value: state.value - n, ..state },
+        MacroAction::SetName(s) => |state| MacroState { name: s, ..state },
         MacroAction::Reset => |_state| MacroState::default(),
     }
 }
 
 #[test]
 fn macro_reducer_handles_all_variants() {
-    let state = MacroState { version: 0, value: 10, name: "test" };
+    let state = MacroState { value: 10, name: "test" };
 
-    let added = MacroReducer::reduce(state.clone(), MacroAction::Add(5));
+    let (added, _) = MacroReducer::reduce(state.clone(), MacroAction::Add(5)).into_parts();
     assert_eq!(added.value, 15);
     assert_eq!(added.name, "test");
 
-    let subtracted = MacroReducer::reduce(state.clone(), MacroAction::Subtract(3));
+    let (subtracted, _) = MacroReducer::reduce(state.clone(), MacroAction::Subtract(3)).into_parts();
     assert_eq!(subtracted.value, 7);
 
-    let named = MacroReducer::reduce(state.clone(), MacroAction::SetName("new"));
+    let (named, _) = MacroReducer::reduce(state.clone(), MacroAction::SetName("new")).into_parts();
     assert_eq!(named.name, "new");
     assert_eq!(named.value, 10);
 
-    let reset = MacroReducer::reduce(state, MacroAction::Reset);
+    let (reset, _) = MacroReducer::reduce(state, MacroAction::Reset).into_parts();
     assert_eq!(reset.value, 0);
     assert_eq!(reset.name, "");
 }
@@ -346,4 +333,55 @@ fn macro_reducer_works_with_store() {
     let changed = store.dispatch::<MacroReducer>(MacroAction::SetName("hello"));
     assert!(changed);
     assert_eq!(store.state().name, "hello");
+}
+
+// ============================================================================
+// Macro with unchanged() DSL tests
+// ============================================================================
+
+#[derive(Clone, PartialEq, Debug, Default)]
+struct DslState {
+    count: i32,
+}
+
+#[derive(Clone, Debug)]
+enum DslAction {
+    Increment,
+    SetCount(i32),
+}
+
+// Macro DSL: return bare state = changed, return unchanged(state) = no-op
+reducto::reducer! {
+    DslReducer for DslState, DslAction {
+        // Simple case: bare state auto-wrapped as changed
+        DslAction::Increment => |state| DslState { count: state.count + 1 },
+        // Conditional: both branches must return Outcome (use unchanged/Outcome::changed)
+        DslAction::SetCount(n) => |state| {
+            if n == state.count {
+                unchanged(state)
+            } else {
+                Outcome::changed(DslState { count: n })
+            }
+        },
+    }
+}
+
+#[test]
+fn macro_dsl_unchanged_skips_callback() {
+    let mut store: Store<DslState, DslAction, 8> = Store::new(DslState { count: 5 });
+
+    // Setting to same value should return false (unchanged)
+    let changed = store.dispatch::<DslReducer>(DslAction::SetCount(5));
+    assert!(!changed);
+    assert_eq!(store.state().count, 5);
+
+    // Setting to different value should return true (changed)
+    let changed = store.dispatch::<DslReducer>(DslAction::SetCount(10));
+    assert!(changed);
+    assert_eq!(store.state().count, 10);
+
+    // Increment always changes
+    let changed = store.dispatch::<DslReducer>(DslAction::Increment);
+    assert!(changed);
+    assert_eq!(store.state().count, 11);
 }

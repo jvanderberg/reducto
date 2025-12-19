@@ -12,14 +12,10 @@
 //! ## Example
 //!
 //! ```rust
-//! use reducto::{Reducer, Store, Versioned};
+//! use reducto::{Outcome, Reducer, Store};
 //!
 //! #[derive(Clone, PartialEq, Default)]
-//! struct AppState { version: u32, count: i32 }
-//!
-//! impl Versioned for AppState {
-//!     fn version(&self) -> u32 { self.version }
-//! }
+//! struct AppState { count: i32 }
 //!
 //! enum Action { Increment, Decrement }
 //!
@@ -29,12 +25,11 @@
 //!     type State = AppState;
 //!     type Action = Action;
 //!
-//!     fn reduce(mut state: Self::State, action: Self::Action) -> Self::State {
+//!     fn reduce(mut state: Self::State, action: Self::Action) -> Outcome<Self::State> {
 //!         match action {
-//!             Action::Increment => { state.count += 1; state.version += 1; }
-//!             Action::Decrement => { state.count -= 1; state.version += 1; }
+//!             Action::Increment => { state.count += 1; Outcome::changed(state) }
+//!             Action::Decrement => { state.count -= 1; Outcome::changed(state) }
 //!         }
-//!         state
 //!     }
 //! }
 //!
@@ -47,18 +42,85 @@
 
 use heapless::String;
 
-/// Trait for state types that track their version.
+/// Result of a reducer - indicates whether state changed.
 ///
-/// Implement this to enable zero-copy change detection. The reducer
-/// should increment the version whenever it modifies state.
-pub trait Versioned {
-    fn version(&self) -> u32;
+/// Most actions change state, so `Changed` is the common case.
+/// Use `Unchanged` to short-circuit when an action is a no-op.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// fn reduce(state: State, action: Action) -> Outcome<State> {
+///     match action {
+///         Action::Increment => Outcome::changed(State { count: state.count + 1 }),
+///         Action::SetValue(v) if v == state.value => Outcome::unchanged(state),
+///         Action::SetValue(v) => Outcome::changed(State { value: v, ..state }),
+///     }
+/// }
+/// ```
+#[derive(Debug)]
+pub enum Outcome<S> {
+    /// State was modified - triggers on_state_change callback
+    Changed(S),
+    /// State was not modified - callback is skipped
+    Unchanged(S),
 }
 
-/// Pure state transformation: (State, Action) -> State
+impl<S> Outcome<S> {
+    /// Create a Changed outcome (most common case)
+    pub fn changed(state: S) -> Self {
+        Outcome::Changed(state)
+    }
+
+    /// Extract the state and whether it changed
+    pub fn into_parts(self) -> (S, bool) {
+        match self {
+            Outcome::Changed(s) => (s, true),
+            Outcome::Unchanged(s) => (s, false),
+        }
+    }
+}
+
+/// Mark state as unchanged (no-op, skip callbacks).
+///
+/// Use this in reducers when an action doesn't modify state:
+/// ```rust,ignore
+/// Action::SetValue(v) if v == state.value => unchanged(state),
+/// ```
+pub fn unchanged<S>(state: S) -> Outcome<S> {
+    Outcome::Unchanged(state)
+}
+
+/// Trait for automatic conversion to Outcome.
+///
+/// This enables the reducer macro to accept either:
+/// - A bare state value (auto-wrapped as `Outcome::Changed`)
+/// - An explicit `Outcome` (passed through)
+pub trait IntoOutcome<S> {
+    fn into_outcome(self) -> Outcome<S>;
+}
+
+// Bare state -> Changed
+impl<S> IntoOutcome<S> for S {
+    fn into_outcome(self) -> Outcome<S> {
+        Outcome::Changed(self)
+    }
+}
+
+// Outcome<S> -> pass through unchanged
+impl<S> IntoOutcome<S> for Outcome<S> {
+    fn into_outcome(self) -> Outcome<S> {
+        self
+    }
+}
+
+/// Pure state transformation: (State, Action) -> Outcome<State>
 ///
 /// Implement this trait to define how actions transform state.
 /// Rust's exhaustive `match` on the Action enum ensures all variants are handled.
+///
+/// Return `Outcome::changed(new_state)` when state is modified, or
+/// `Outcome::unchanged(state)` to short-circuit no-op actions.
 pub trait Reducer {
     /// The state type this reducer operates on
     type State;
@@ -69,7 +131,10 @@ pub trait Reducer {
     ///
     /// This must be a pure function - no side effects allowed.
     /// The same inputs must always produce the same output.
-    fn reduce(state: Self::State, action: Self::Action) -> Self::State;
+    ///
+    /// Return `Outcome::changed()` for most actions, `Outcome::unchanged()`
+    /// to skip the on_state_change callback.
+    fn reduce(state: Self::State, action: Self::Action) -> Outcome<Self::State>;
 }
 
 /// Store holds application state and an action queue.
@@ -134,7 +199,7 @@ impl<S, A, const N: usize> Store<S, A, N> {
 
     /// Dispatch a single action through the reducer immediately.
     ///
-    /// Returns `true` if the state changed (based on version field).
+    /// Returns `true` if the reducer returned `Outcome::changed()`.
     /// Prefer `process_queue_with_callback()` for normal operation.
     ///
     /// Note: State is moved to reducer (zero-copy). Rust's ownership
@@ -142,11 +207,11 @@ impl<S, A, const N: usize> Store<S, A, N> {
     pub fn dispatch<R>(&mut self, action: A) -> bool
     where
         R: Reducer<State = S, Action = A>,
-        S: Default + Versioned,
+        S: Default,
     {
-        let old_version = self.state.version();
-        self.state = R::reduce(core::mem::take(&mut self.state), action);
-        self.state.version() != old_version
+        let (new_state, changed) = R::reduce(core::mem::take(&mut self.state), action).into_parts();
+        self.state = new_state;
+        changed
     }
 
     /// Process all queued actions, returning the number of state changes.
@@ -156,13 +221,13 @@ impl<S, A, const N: usize> Store<S, A, N> {
     pub fn process_queue<R>(&mut self) -> usize
     where
         R: Reducer<State = S, Action = A>,
-        S: Default + Versioned,
+        S: Default,
     {
         let mut changes = 0;
         while let Some(action) = self.queue.pop_front() {
-            let old_version = self.state.version();
-            self.state = R::reduce(core::mem::take(&mut self.state), action);
-            if self.state.version() != old_version {
+            let (new_state, changed) = R::reduce(core::mem::take(&mut self.state), action).into_parts();
+            self.state = new_state;
+            if changed {
                 changes += 1;
             }
         }
@@ -172,10 +237,11 @@ impl<S, A, const N: usize> Store<S, A, N> {
     /// Process all queued actions, calling `on_change` for each state change.
     ///
     /// This is the primary method for the main loop. It drains the queue,
-    /// dispatches each action, and calls the callback whenever state changes.
+    /// dispatches each action, and calls the callback when reducer returns
+    /// `Outcome::changed()`.
     ///
     /// Zero-copy: state is moved to reducer, not cloned. Rust's ownership
-    /// guarantees no external mutation. Version-based change detection.
+    /// guarantees no external mutation.
     ///
     /// # Example
     ///
@@ -187,13 +253,13 @@ impl<S, A, const N: usize> Store<S, A, N> {
     pub fn process_queue_with_callback<R, F>(&mut self, mut on_change: F)
     where
         R: Reducer<State = S, Action = A>,
-        S: Default + Versioned,
+        S: Default,
         F: FnMut(&S),
     {
         while let Some(action) = self.queue.pop_front() {
-            let old_version = self.state.version();
-            self.state = R::reduce(core::mem::take(&mut self.state), action);
-            if self.state.version() != old_version {
+            let (new_state, changed) = R::reduce(core::mem::take(&mut self.state), action).into_parts();
+            self.state = new_state;
+            if changed {
                 on_change(&self.state);
             }
         }
@@ -286,7 +352,7 @@ impl<const N: usize> Default for TextView<N> {
 /// The framework drains the queue automatically.
 ///
 /// Zero-copy design: state is moved to reducer (not cloned). Rust's ownership
-/// guarantees immutability. Change detection via version field.
+/// guarantees immutability. Change detection via `Outcome` return type.
 ///
 /// # Example
 ///
@@ -308,7 +374,7 @@ impl<const N: usize> Default for TextView<N> {
 /// ```
 pub trait Application {
     /// The state type for this application
-    type State: Default + Versioned;
+    type State: Default;
     /// The action type for this application
     type Action;
     /// The reducer that handles state transitions
@@ -316,7 +382,7 @@ pub trait Application {
 
     /// Execute side effects when state changes.
     ///
-    /// Called ONLY when state version changed after dispatch.
+    /// Called ONLY when reducer returns `Outcome::changed()`.
     /// This is where you should render to displays, update LEDs, etc.
     fn on_state_change(&mut self, state: &Self::State);
 
@@ -344,17 +410,16 @@ pub trait Application {
 /// }
 /// ```
 ///
+/// Each arm's body is automatically wrapped in `Outcome::changed()`.
+/// For no-op short-circuits, return `Outcome::unchanged(state)` explicitly.
+///
 /// # Example
 ///
 /// ```rust
-/// use reducto::{Reducer, Store, Versioned};
+/// use reducto::{Outcome, Reducer, Store};
 ///
 /// #[derive(Clone, PartialEq, Default)]
-/// struct Counter { version: u32, count: i32 }
-///
-/// impl Versioned for Counter {
-///     fn version(&self) -> u32 { self.version }
-/// }
+/// struct Counter { count: i32 }
 ///
 /// #[derive(Clone)]
 /// enum CounterAction {
@@ -365,9 +430,9 @@ pub trait Application {
 ///
 /// reducto::reducer! {
 ///     CounterReducer for Counter, CounterAction {
-///         CounterAction::Increment => |state| Counter { version: state.version + 1, count: state.count + 1 },
-///         CounterAction::Decrement => |state| Counter { version: state.version + 1, count: state.count - 1 },
-///         CounterAction::Set(n) => |_state| Counter { version: 1, count: n },
+///         CounterAction::Increment => |state| Counter { count: state.count + 1 },
+///         CounterAction::Decrement => |state| Counter { count: state.count - 1 },
+///         CounterAction::Set(n) => |_state| Counter { count: n },
 ///     }
 /// }
 ///
@@ -388,11 +453,11 @@ macro_rules! reducer {
             type State = $state_type;
             type Action = $action_type;
 
-            fn reduce(state: Self::State, action: Self::Action) -> Self::State {
+            fn reduce(state: Self::State, action: Self::Action) -> $crate::Outcome<Self::State> {
                 match action {
                     $( $pattern => {
                         let $state_var = state;
-                        $body
+                        $crate::IntoOutcome::into_outcome($body)
                     } ),*
                 }
             }

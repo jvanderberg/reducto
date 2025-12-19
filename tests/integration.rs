@@ -3,7 +3,7 @@
 //! TDD: Write failing tests first (RED), then implement to pass (GREEN)
 
 use core::fmt::Write;
-use reducto::{Application, Outcome, Reducer, Store, TextView, View, unchanged};
+use reducto::{Application, Outcome, Reducer, Store, TextView, View, changed, unchanged};
 
 // Test state and action types
 #[derive(Clone, PartialEq, Debug, Default)]
@@ -35,7 +35,7 @@ impl Reducer for TestReducer {
                 state.count -= 1;
                 Outcome::changed(state)
             }
-            TestAction::Set(val) if val == state.count => unchanged(state),
+            TestAction::Set(val) if val == state.count => Outcome::Unchanged(state),
             TestAction::Set(val) => {
                 state.count = val;
                 Outcome::changed(state)
@@ -129,14 +129,26 @@ fn reducer_handles_all_variants() {
 // ============================================================================
 
 // A test view that renders state to a text buffer
-struct CounterView;
+struct CounterView {
+    buffer: TextView<128>,
+}
+
+impl CounterView {
+    fn new() -> Self {
+        Self { buffer: TextView::new() }
+    }
+}
 
 impl View for CounterView {
     type State = TestState;
 
-    fn render(&mut self, view: &mut TextView<128>, state: &Self::State) {
-        view.clear();
-        write!(view.buffer_mut(), "Count: {}", state.count).ok();
+    fn render(&mut self, state: &Self::State) {
+        self.buffer.clear();
+        write!(self.buffer.buffer_mut(), "Count: {}", state.count).ok();
+    }
+
+    fn text(&self) -> &str {
+        self.buffer.as_str()
     }
 }
 
@@ -147,27 +159,25 @@ fn text_view_can_be_created() {
 }
 
 #[test]
-fn text_view_renders_state() {
+fn view_renders_state() {
     let state = TestState { count: 42 };
-    let mut text_view = TextView::<128>::new();
-    let mut counter_view = CounterView;
+    let mut view = CounterView::new();
 
-    counter_view.render(&mut text_view, &state);
+    view.render(&state);
 
-    assert_eq!(text_view.as_str(), "Count: 42");
+    assert_eq!(view.text(), "Count: 42");
 }
 
 #[test]
-fn text_view_contains_works() {
+fn view_text_contains_works() {
     let state = TestState { count: 99 };
-    let mut text_view = TextView::<128>::new();
-    let mut counter_view = CounterView;
+    let mut view = CounterView::new();
 
-    counter_view.render(&mut text_view, &state);
+    view.render(&state);
 
-    assert!(text_view.contains("Count:"));
-    assert!(text_view.contains("99"));
-    assert!(!text_view.contains("42"));
+    assert!(view.text().contains("Count:"));
+    assert!(view.text().contains("99"));
+    assert!(!view.text().contains("42"));
 }
 
 #[test]
@@ -184,10 +194,38 @@ fn text_view_clear_works() {
 // Application trait tests
 // ============================================================================
 
+/// Test view that renders count to text buffer
+struct TestAppView {
+    buffer: TextView<128>,
+    render_count: usize,
+}
+
+impl TestAppView {
+    fn new() -> Self {
+        Self {
+            buffer: TextView::new(),
+            render_count: 0,
+        }
+    }
+}
+
+impl View for TestAppView {
+    type State = TestState;
+
+    fn render(&mut self, state: &Self::State) {
+        self.buffer.clear();
+        write!(self.buffer.buffer_mut(), "Count: {}", state.count).ok();
+        self.render_count += 1;
+    }
+
+    fn text(&self) -> &str {
+        self.buffer.as_str()
+    }
+}
+
 /// Test application that records interactions for verification
 struct TestApp {
-    /// Record of states passed to on_state_change
-    state_changes: Vec<TestState>,
+    view: TestAppView,
     /// Number of times tick was called
     tick_count: usize,
 }
@@ -195,7 +233,7 @@ struct TestApp {
 impl TestApp {
     fn new() -> Self {
         Self {
-            state_changes: Vec::new(),
+            view: TestAppView::new(),
             tick_count: 0,
         }
     }
@@ -205,9 +243,10 @@ impl Application for TestApp {
     type State = TestState;
     type Action = TestAction;
     type Reducer = TestReducer;
+    type View = TestAppView;
 
-    fn on_state_change(&mut self, state: &TestState) {
-        self.state_changes.push(state.clone());
+    fn view(&mut self) -> &mut Self::View {
+        &mut self.view
     }
 
     fn tick(&mut self) {
@@ -216,7 +255,7 @@ impl Application for TestApp {
 }
 
 #[test]
-fn application_on_state_change_called_when_state_changes() {
+fn application_renders_when_state_changes() {
     let mut app = TestApp::new();
     let mut store: Store<TestState, TestAction, 8> = Store::new(TestState::default());
 
@@ -225,30 +264,34 @@ fn application_on_state_change_called_when_state_changes() {
 
     // Simulate one iteration of run_loop
     app.tick();
-    store.process_queue_with_callback::<TestReducer, _>(|state| {
-        app.on_state_change(state);
-    });
+    while let Some(action) = store.pop_action() {
+        if store.dispatch::<TestReducer>(action) {
+            app.view().render(store.state());
+        }
+    }
 
-    assert_eq!(app.state_changes.len(), 1);
-    assert_eq!(app.state_changes[0].count, 1);  // new state
+    assert_eq!(app.view.render_count, 1);
+    assert!(app.view().text().contains("Count: 1"));
 }
 
 #[test]
-fn application_on_state_change_not_called_when_state_unchanged() {
+fn application_does_not_render_when_state_unchanged() {
     let mut app = TestApp::new();
     let mut store: Store<TestState, TestAction, 8> = Store::new(TestState::default());
 
-    // Enqueue action that sets to same value (version won't increment)
+    // Enqueue action that sets to same value (state won't change)
     store.enqueue(TestAction::Set(0)).unwrap();
 
     // Simulate one iteration
     app.tick();
-    store.process_queue_with_callback::<TestReducer, _>(|state| {
-        app.on_state_change(state);
-    });
+    while let Some(action) = store.pop_action() {
+        if store.dispatch::<TestReducer>(action) {
+            app.view().render(store.state());
+        }
+    }
 
-    // State didn't change, so on_state_change should NOT have been called
-    assert_eq!(app.state_changes.len(), 0);
+    // State didn't change, so render should NOT have been called
+    assert_eq!(app.view.render_count, 0);
 }
 
 #[test]
@@ -263,13 +306,16 @@ fn application_processes_multiple_queued_actions() {
 
     // Single iteration processes all queued actions
     app.tick();
-    store.process_queue_with_callback::<TestReducer, _>(|state| {
-        app.on_state_change(state);
-    });
+    while let Some(action) = store.pop_action() {
+        if store.dispatch::<TestReducer>(action) {
+            app.view().render(store.state());
+        }
+    }
 
     assert_eq!(app.tick_count, 1);
-    assert_eq!(app.state_changes.len(), 3);  // 3 state changes
+    assert_eq!(app.view.render_count, 3);  // 3 state changes = 3 renders
     assert_eq!(store.state().count, 100);  // Final state
+    assert!(app.view().text().contains("Count: 100"));  // Final render
 }
 
 // ============================================================================
@@ -350,38 +396,65 @@ enum DslAction {
     SetCount(i32),
 }
 
-// Macro DSL: return bare state = changed, return unchanged(state) = no-op
+// Using unchanged() function for no-op arms
 reducto::reducer! {
     DslReducer for DslState, DslAction {
-        // Simple case: bare state auto-wrapped as changed
         DslAction::Increment => |state| DslState { count: state.count + 1 },
-        // Conditional: both branches must return Outcome (use unchanged/Outcome::changed)
-        DslAction::SetCount(n) => |state| {
-            if n == state.count {
+        // Always returns unchanged for this test
+        DslAction::SetCount(_n) => |state| unchanged(state),
+    }
+}
+
+// Demonstrates if/else with changed()/unchanged() - both branches have same type
+#[derive(Clone, PartialEq, Debug, Default)]
+struct ConditionalState {
+    value: i32,
+}
+
+#[derive(Clone, Debug)]
+enum ConditionalAction {
+    SetValue(i32),
+}
+
+reducto::reducer! {
+    ConditionalReducer for ConditionalState, ConditionalAction {
+        ConditionalAction::SetValue(n) => |state| {
+            if n == state.value {
                 unchanged(state)
             } else {
-                Outcome::changed(DslState { count: n })
+                changed(ConditionalState { value: n })
             }
         },
     }
 }
 
 #[test]
-fn macro_dsl_unchanged_skips_callback() {
+fn macro_unchanged_dsl_skips_callback() {
     let mut store: Store<DslState, DslAction, 8> = Store::new(DslState { count: 5 });
 
-    // Setting to same value should return false (unchanged)
-    let changed = store.dispatch::<DslReducer>(DslAction::SetCount(5));
+    // SetCount uses unchanged() - returns false, state untouched
+    let changed = store.dispatch::<DslReducer>(DslAction::SetCount(99));
     assert!(!changed);
     assert_eq!(store.state().count, 5);
 
-    // Setting to different value should return true (changed)
-    let changed = store.dispatch::<DslReducer>(DslAction::SetCount(10));
-    assert!(changed);
-    assert_eq!(store.state().count, 10);
-
-    // Increment always changes
+    // Increment is normal - returns true, state updated
     let changed = store.dispatch::<DslReducer>(DslAction::Increment);
     assert!(changed);
-    assert_eq!(store.state().count, 11);
+    assert_eq!(store.state().count, 6);
+}
+
+#[test]
+fn conditional_reducer_if_else_works() {
+    let mut store: Store<ConditionalState, ConditionalAction, 8> =
+        Store::new(ConditionalState { value: 10 });
+
+    // Setting to same value - unchanged() branch
+    let did_change = store.dispatch::<ConditionalReducer>(ConditionalAction::SetValue(10));
+    assert!(!did_change);
+    assert_eq!(store.state().value, 10);
+
+    // Setting to different value - changed() branch
+    let did_change = store.dispatch::<ConditionalReducer>(ConditionalAction::SetValue(42));
+    assert!(did_change);
+    assert_eq!(store.state().value, 42);
 }

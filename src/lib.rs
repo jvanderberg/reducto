@@ -81,15 +81,22 @@ impl<S> Outcome<S> {
     }
 }
 
-/// Mark state as unchanged (no-op, skip callbacks).
-///
-/// Use this in reducers when an action doesn't modify state:
+/// Mark state as changed. Use in reducer if/else branches:
 /// ```rust,ignore
-/// Action::SetValue(v) if v == state.value => unchanged(state),
+/// if condition { changed(new_state) } else { unchanged(state) }
+/// ```
+pub fn changed<S>(state: S) -> Outcome<S> {
+    Outcome::Changed(state)
+}
+
+/// Mark state as unchanged. Use in reducer if/else branches:
+/// ```rust,ignore
+/// if condition { unchanged(state) } else { changed(new_state) }
 /// ```
 pub fn unchanged<S>(state: S) -> Outcome<S> {
     Outcome::Unchanged(state)
 }
+
 
 /// Trait for automatic conversion to Outcome.
 ///
@@ -189,12 +196,19 @@ impl<S, A, const N: usize> Store<S, A, N> {
     /// Note: For ISR safety, wrap the Store in appropriate synchronization
     /// primitives (e.g., `Mutex<RefCell<Store>>` or use Embassy channels).
     pub fn enqueue(&mut self, action: A) -> Result<(), A> {
-        self.queue.push_back(action).map_err(|a| a)
+        self.queue.push_back(action)
     }
 
     /// Check if the action queue is empty.
     pub fn is_queue_empty(&self) -> bool {
         self.queue.is_empty()
+    }
+
+    /// Pop the next action from the queue, if any.
+    ///
+    /// Used by `run_loop` to process actions one at a time.
+    pub fn pop_action(&mut self) -> Option<A> {
+        self.queue.pop_front()
     }
 
     /// Dispatch a single action through the reducer immediately.
@@ -268,20 +282,54 @@ impl<S, A, const N: usize> Store<S, A, N> {
 
 /// View renders state to some output.
 ///
-/// The View trait is kept separate from Store - the application decides
-/// when to render, not the framework. This keeps side effects isolated.
+/// Views own their internal buffer and handle rendering. For hardware displays,
+/// the View implementation can also flush to the display driver.
+/// For testing, use `text()` to inspect the rendered output.
 ///
-/// Views receive a `TextView` buffer for rendering. For hardware displays,
-/// the View implementation translates the text buffer to display commands.
-/// For testing, you can inspect the `TextView` contents directly.
+/// # Example
+///
+/// ```rust
+/// use reducto::{View, TextView};
+/// use core::fmt::Write;
+///
+/// struct CounterView {
+///     buffer: TextView<128>,
+/// }
+///
+/// impl CounterView {
+///     fn new() -> Self {
+///         Self { buffer: TextView::new() }
+///     }
+/// }
+///
+/// impl View for CounterView {
+///     type State = i32;
+///
+///     fn render(&mut self, state: &Self::State) {
+///         self.buffer.clear();
+///         write!(self.buffer.buffer_mut(), "Count: {}", state).ok();
+///     }
+///
+///     fn text(&self) -> &str {
+///         self.buffer.as_str()
+///     }
+/// }
+///
+/// let mut view = CounterView::new();
+/// view.render(&42);
+/// assert!(view.text().contains("42"));
+/// ```
 pub trait View {
     /// The state type this view renders
     type State;
 
-    /// Render the state to the text view buffer.
+    /// Render the state to the internal buffer.
     ///
-    /// Called by the application when state changes and a render is needed.
-    fn render(&mut self, view: &mut TextView<128>, state: &Self::State);
+    /// For hardware views, this can also flush to the display.
+    fn render(&mut self, state: &Self::State);
+
+    /// Get the rendered text for inspection (primarily for testing).
+    fn text(&self) -> &str;
 }
 
 /// A text buffer for testing views without hardware.
@@ -346,26 +394,26 @@ impl<const N: usize> Default for TextView<N> {
 /// provides the main loop structure, ensuring correct ordering:
 /// 1. `tick()` is called every iteration
 /// 2. All queued actions are processed through the reducer
-/// 3. For each state change, `on_state_change()` is called
+/// 3. For each state change, `view().render(state)` is called automatically
 ///
 /// Actions are queued via `Store::enqueue()` from ISRs or event handlers.
 /// The framework drains the queue automatically.
 ///
-/// Zero-copy design: state is moved to reducer (not cloned). Rust's ownership
-/// guarantees immutability. Change detection via `Outcome` return type.
-///
 /// # Example
 ///
 /// ```rust,ignore
-/// struct MyApp { display: Display }
+/// struct MyApp {
+///     view: AppView,
+/// }
 ///
 /// impl Application for MyApp {
 ///     type State = AppState;
 ///     type Action = Action;
 ///     type Reducer = AppReducer;
+///     type View = AppView;
 ///
-///     fn on_state_change(&mut self, state: &AppState) {
-///         self.display.render(state);
+///     fn view(&mut self) -> &mut Self::View {
+///         &mut self.view
 ///     }
 /// }
 ///
@@ -379,12 +427,13 @@ pub trait Application {
     type Action;
     /// The reducer that handles state transitions
     type Reducer: Reducer<State = Self::State, Action = Self::Action>;
+    /// The root view that renders state
+    type View: View<State = Self::State>;
 
-    /// Execute side effects when state changes.
+    /// Return the root view for rendering.
     ///
-    /// Called ONLY when reducer returns `Outcome::changed()`.
-    /// This is where you should render to displays, update LEDs, etc.
-    fn on_state_change(&mut self, state: &Self::State);
+    /// The framework calls `view().render(state)` when state changes.
+    fn view(&mut self) -> &mut Self::View;
 
     /// Called every loop iteration regardless of state changes.
     ///
@@ -444,7 +493,7 @@ pub trait Application {
 macro_rules! reducer {
     (
         $reducer_name:ident for $state_type:ty, $action_type:ty {
-            $( $pattern:pat => |$state_var:ident| $body:expr ),* $(,)?
+            $( $pattern:pat => |$var:ident| $body:expr ),* $(,)?
         }
     ) => {
         struct $reducer_name;
@@ -453,50 +502,58 @@ macro_rules! reducer {
             type State = $state_type;
             type Action = $action_type;
 
+            #[allow(unused_variables, unused_mut)]
             fn reduce(state: Self::State, action: Self::Action) -> $crate::Outcome<Self::State> {
                 match action {
-                    $( $pattern => {
-                        let $state_var = state;
-                        $crate::IntoOutcome::into_outcome($body)
-                    } ),*
+                    $(
+                        $pattern => {
+                            let mut $var = state;
+                            $crate::IntoOutcome::into_outcome($body)
+                        }
+                    ),*
                 }
             }
         }
     };
 }
 
+/// Process one iteration of the application loop.
+///
+/// This is the core logic used by `run_loop`. Call this in tests to
+/// simulate loop iterations without blocking forever.
+///
+/// Each call:
+/// 1. Calls `app.tick()`
+/// 2. Drains all queued actions through the reducer
+/// 3. Calls `view().render()` for each state change
+///
+/// Returns the number of renders (state changes) that occurred.
+pub fn process_iteration<A: Application, const Q: usize>(
+    app: &mut A,
+    store: &mut Store<A::State, A::Action, Q>,
+) -> usize {
+    app.tick();
+    let mut renders = 0;
+    while let Some(action) = store.pop_action() {
+        if store.dispatch::<A::Reducer>(action) {
+            app.view().render(store.state());
+            renders += 1;
+        }
+    }
+    renders
+}
+
 /// Run the application main loop.
 ///
-/// This function never returns (indicated by `-> !`). It implements
-/// the bullet-proof loop pattern:
+/// This function never returns (indicated by `-> !`). It calls
+/// `process_iteration` in an infinite loop.
 ///
-/// ```text
-/// loop {
-///     app.tick()
-///     for action in store.drain_queue() {
-///         old = state.clone()
-///         dispatch(action)
-///         if state != old {
-///             app.on_state_change(old, new)
-///         }
-///     }
-/// }
-/// ```
-///
-/// Actions are queued via `Store::enqueue()` from ISRs or event handlers.
-///
-/// # Note
-///
-/// For testing, you can simulate the loop manually rather than calling
-/// this function, since it never returns.
-pub fn run_loop<A: Application, const N: usize>(
+/// For testing, use `process_iteration` directly instead.
+pub fn run_loop<A: Application, const Q: usize>(
     app: &mut A,
-    store: &mut Store<A::State, A::Action, N>,
+    store: &mut Store<A::State, A::Action, Q>,
 ) -> ! {
     loop {
-        app.tick();
-        store.process_queue_with_callback::<A::Reducer, _>(|state| {
-            app.on_state_change(state);
-        });
+        process_iteration(app, store);
     }
 }

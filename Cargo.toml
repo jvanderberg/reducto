@@ -2,7 +2,22 @@
 name = "reducto"
 version = "0.1.0"
 edition = "2021"
+description = "A no_std Redux-like state management framework for embedded systems"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/joshvera/reducto"
+keywords = ["embedded", "no_std", "redux", "state-management"]
+categories = ["embedded", "no-std"]
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+default = []
+std = []  # Enable std for testing
 
 [dependencies]
+heapless = "0.8"
+
+[dev-dependencies]
+# Tests run with std
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"

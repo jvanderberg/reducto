@@ -54,7 +54,6 @@
 //!         self.buffer.clear();
 //!         write!(self.buffer.buffer_mut(), "Count: {}", state.count).ok();
 //!     }
-//!     fn text(&self) -> &str { self.buffer.as_str() }
 //! }
 //!
 //! let mut app = App::<AppState, Action, AppReducer, AppView>::new(
@@ -213,15 +212,11 @@ pub trait Reducer {
 ///         self.buffer.clear();
 ///         write!(self.buffer.buffer_mut(), "Count: {}", state).ok();
 ///     }
-///
-///     fn text(&self) -> &str {
-///         self.buffer.as_str()
-///     }
 /// }
 ///
 /// let mut view = CounterView::new();
 /// view.render(&42);
-/// assert!(view.text().contains("42"));
+/// assert!(view.buffer.contains("42"));
 /// ```
 pub trait View {
     /// The state type this view renders
@@ -231,9 +226,6 @@ pub trait View {
     ///
     /// For hardware views, this can also flush to the display.
     fn render(&mut self, state: &Self::State);
-
-    /// Get the rendered text for inspection (primarily for testing).
-    fn text(&self) -> &str;
 }
 
 /// A text buffer for testing views without hardware.
@@ -486,7 +478,6 @@ where
 /// impl View for CounterView {
 ///     type State = Counter;
 ///     fn render(&mut self, _: &Counter) {}
-///     fn text(&self) -> &str { "" }
 /// }
 ///
 /// let mut app: App<Counter, CounterAction, CounterReducer, CounterView> =

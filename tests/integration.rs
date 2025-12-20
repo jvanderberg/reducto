@@ -88,10 +88,6 @@ impl View for CounterView {
         self.buffer.clear();
         write!(self.buffer.buffer_mut(), "Count: {}", state.count).ok();
     }
-
-    fn text(&self) -> &str {
-        self.buffer.as_str()
-    }
 }
 
 #[test]
@@ -107,7 +103,7 @@ fn view_renders_state() {
 
     view.render(&state);
 
-    assert_eq!(view.text(), "Count: 42");
+    assert_eq!(view.buffer.as_str(), "Count: 42");
 }
 
 #[test]
@@ -117,9 +113,9 @@ fn view_text_contains_works() {
 
     view.render(&state);
 
-    assert!(view.text().contains("Count:"));
-    assert!(view.text().contains("99"));
-    assert!(!view.text().contains("42"));
+    assert!(view.buffer.contains("Count:"));
+    assert!(view.buffer.contains("99"));
+    assert!(!view.buffer.contains("42"));
 }
 
 #[test]
@@ -176,10 +172,6 @@ impl View for TestAppView {
         write!(self.buffer.buffer_mut(), "Count: {}", state.count).ok();
         self.render_count += 1;
     }
-
-    fn text(&self) -> &str {
-        self.buffer.as_str()
-    }
 }
 
 #[test]
@@ -223,7 +215,7 @@ fn app_dispatch_renders_and_returns_effect() {
     assert_eq!(effect, TestEffect::None);
     assert_eq!(app.state().count, 6);
     assert_eq!(app.view().render_count, 1);
-    assert!(app.view().text().contains("Count: 6"));
+    assert!(app.view().buffer.contains("Count: 6"));
 }
 
 #[test]
@@ -252,7 +244,7 @@ fn app_processes_multiple_actions() {
 
     assert_eq!(app.state().count, 100);
     assert_eq!(app.view().render_count, 3);
-    assert!(app.view().text().contains("Count: 100"));
+    assert!(app.view().buffer.contains("Count: 100"));
 }
 
 // ============================================================================
@@ -350,7 +342,6 @@ struct MacroView;
 impl View for MacroView {
     type State = MacroState;
     fn render(&mut self, _state: &Self::State) {}
-    fn text(&self) -> &str { "" }
 }
 
 #[test]
@@ -458,9 +449,6 @@ impl View for MockView {
     fn render(&mut self, state: &Self::State) {
         self.buffer.clear();
         write!(self.buffer.buffer_mut(), "Brightness: {}", state.brightness).ok();
-    }
-    fn text(&self) -> &str {
-        self.buffer.as_str()
     }
 }
 

@@ -51,7 +51,6 @@ impl View for AppView {
         self.buffer.clear();
         write!(self.buffer.buffer_mut(), "Count: {}", state.count).ok();
     }
-    fn text(&self) -> &str { self.buffer.as_str() }
 }
 
 // Create and use your app

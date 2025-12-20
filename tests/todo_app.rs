@@ -178,10 +178,6 @@ impl View for TodoView {
         writeln!(buf, "----------------").ok();
         writeln!(buf, "{} active, {} completed", active_count, completed_count).ok();
     }
-
-    fn text(&self) -> &str {
-        self.buffer.as_str()
-    }
 }
 
 // ============================================================================
@@ -203,7 +199,7 @@ fn todo_app_full_workflow() {
     text.push_str("Buy milk").ok();
     let effect = app.dispatch(TodoAction::Add(text));
     assert!(!effect.is_unchanged());
-    assert!(app.view().text().contains("[ ] Buy milk"));
+    assert!(app.view().buffer.as_str().contains("[ ] Buy milk"));
 
     let mut text = heapless::String::<32>::new();
     text.push_str("Write code").ok();
@@ -214,39 +210,39 @@ fn todo_app_full_workflow() {
     app.dispatch(TodoAction::Add(text));
 
     assert_eq!(app.state().todos.len(), 3);
-    assert!(app.view().text().contains("3 active, 0 completed"));
+    assert!(app.view().buffer.as_str().contains("3 active, 0 completed"));
 
     // Toggle one complete
     app.dispatch(TodoAction::Toggle(1));
-    assert!(app.view().text().contains("[x] Write code"));
-    assert!(app.view().text().contains("2 active, 1 completed"));
+    assert!(app.view().buffer.as_str().contains("[x] Write code"));
+    assert!(app.view().buffer.as_str().contains("2 active, 1 completed"));
 
     // Filter to active only
     app.dispatch(TodoAction::SetFilter(Filter::Active));
-    assert!(app.view().text().contains("Filter: Active"));
-    assert!(!app.view().text().contains("Write code")); // completed, shouldn't show
-    assert!(app.view().text().contains("Buy milk"));
+    assert!(app.view().buffer.as_str().contains("Filter: Active"));
+    assert!(!app.view().buffer.as_str().contains("Write code")); // completed, shouldn't show
+    assert!(app.view().buffer.as_str().contains("Buy milk"));
 
     // Filter to completed only
     app.dispatch(TodoAction::SetFilter(Filter::Completed));
-    assert!(app.view().text().contains("[x] Write code"));
-    assert!(!app.view().text().contains("Buy milk")); // active, shouldn't show
+    assert!(app.view().buffer.as_str().contains("[x] Write code"));
+    assert!(!app.view().buffer.as_str().contains("Buy milk")); // active, shouldn't show
 
     // Back to all
     app.dispatch(TodoAction::SetFilter(Filter::All));
-    assert!(app.view().text().contains("Buy milk"));
-    assert!(app.view().text().contains("Write code"));
+    assert!(app.view().buffer.as_str().contains("Buy milk"));
+    assert!(app.view().buffer.as_str().contains("Write code"));
 
     // Delete a todo
     app.dispatch(TodoAction::Delete(0));
-    assert!(!app.view().text().contains("Buy milk"));
+    assert!(!app.view().buffer.as_str().contains("Buy milk"));
     assert_eq!(app.state().todos.len(), 2);
 
     // Clear completed
     app.dispatch(TodoAction::ClearCompleted);
-    assert!(!app.view().text().contains("Write code"));
+    assert!(!app.view().buffer.as_str().contains("Write code"));
     assert_eq!(app.state().todos.len(), 1);
-    assert!(app.view().text().contains("Test reducto"));
+    assert!(app.view().buffer.as_str().contains("Test reducto"));
 
     // No-op actions shouldn't change state
     let effect = app.dispatch(TodoAction::Add(empty));
@@ -264,7 +260,7 @@ fn todo_app_full_workflow() {
     let effect = app.dispatch(TodoAction::ClearCompleted); // none completed
     assert!(effect.is_unchanged());
 
-    println!("Final view:\n{}", app.view().text());
+    println!("Final view:\n{}", app.view().buffer.as_str());
 }
 
 #[test]
@@ -286,8 +282,8 @@ fn todo_app_with_queue() {
     let effects = app.process_queue();
 
     assert_eq!(effects.len(), 3);
-    assert!(app.view().text().contains("[x] Task 1"));
-    assert!(app.view().text().contains("[ ] Task 2"));
+    assert!(app.view().buffer.as_str().contains("[x] Task 1"));
+    assert!(app.view().buffer.as_str().contains("[ ] Task 2"));
 }
 
 // ============================================================================
@@ -312,9 +308,9 @@ fn todo_app_with_app() {
     app.dispatch(TodoAction::Toggle(0));
 
     // Verify final state
-    assert!(app.view().text().contains("[x] Learn Rust"));
-    assert!(app.view().text().contains("[ ] Build firmware"));
-    assert!(app.view().text().contains("1 active, 1 completed"));
+    assert!(app.view().buffer.as_str().contains("[x] Learn Rust"));
+    assert!(app.view().buffer.as_str().contains("[ ] Build firmware"));
+    assert!(app.view().buffer.as_str().contains("1 active, 1 completed"));
 }
 
 // ============================================================================

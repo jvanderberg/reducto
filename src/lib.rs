@@ -28,6 +28,7 @@
 //!     fn is_unchanged(&self) -> bool {
 //!         matches!(self, AppEffect::Unchanged)
 //!     }
+//!     fn changed() -> Self { AppEffect::None }
 //! }
 //!
 //! struct AppReducer;
@@ -91,11 +92,45 @@ use heapless::String;
 ///     fn is_unchanged(&self) -> bool {
 ///         matches!(self, AppEffect::Unchanged)
 ///     }
+///     fn changed() -> Self {
+///         AppEffect::None
+///     }
 /// }
 /// ```
 pub trait Effect {
     /// Returns true if state was not modified (skip rendering).
     fn is_unchanged(&self) -> bool;
+
+    /// Returns the default "state changed" effect.
+    ///
+    /// This is used by the `reducer!` macro to allow implicit returns
+    /// when the reducer body doesn't explicitly return an effect.
+    fn changed() -> Self;
+}
+
+/// Converts a value into an Effect.
+///
+/// This trait enables ergonomic reducer definitions where:
+/// - `()` (unit) automatically becomes `Effect::changed()`
+/// - An explicit `Effect` value passes through unchanged
+///
+/// Used by the `reducer!` macro to allow implicit effect returns.
+pub trait IntoEffect<E: Effect> {
+    fn into_effect(self) -> E;
+}
+
+/// Unit type converts to the default "changed" effect.
+impl<E: Effect> IntoEffect<E> for () {
+    fn into_effect(self) -> E {
+        E::changed()
+    }
+}
+
+/// Effects pass through unchanged.
+impl<E: Effect> IntoEffect<E> for E {
+    fn into_effect(self) -> E {
+        self
+    }
 }
 
 /// Mutable state transformation: (&mut State, Action) -> Effect
@@ -426,18 +461,26 @@ where
 /// that all action variants are handled (Rust's exhaustive match checking
 /// applies to the generated code).
 ///
+/// # Implicit Effect Returns
+///
+/// The macro uses `IntoEffect` to allow implicit returns:
+/// - If the body returns `()`, it becomes `Effect::changed()` (state changed, render)
+/// - If the body returns an explicit `Effect`, it passes through
+///
 /// # Syntax
 ///
 /// ```rust,ignore
 /// reducto::reducer! {
 ///     ReducerName for State, Action, Effect {
-///         Action::Variant1 => |state| { state.field += 1; Effect::None },
-///         Action::Variant2(val) => |state| { state.field = val; Effect::Save },
+///         // Implicit: returns () which becomes Effect::changed()
+///         Action::Increment => |state| state.field += 1,
+///
+///         // Explicit: returns specific effect
+///         Action::Save => |state| { state.dirty = false; Effect::Save },
+///         Action::NoOp => |state| Effect::Unchanged,
 ///     }
 /// }
 /// ```
-///
-/// Each arm receives `&mut state` and must return an Effect.
 ///
 /// # Example
 ///
@@ -454,13 +497,14 @@ where
 ///
 /// impl Effect for CounterEffect {
 ///     fn is_unchanged(&self) -> bool { matches!(self, CounterEffect::Unchanged) }
+///     fn changed() -> Self { CounterEffect::None }
 /// }
 ///
 /// reducto::reducer! {
 ///     CounterReducer for Counter, CounterAction, CounterEffect {
-///         CounterAction::Increment => |state| { state.count += 1; CounterEffect::None },
-///         CounterAction::Decrement => |state| { state.count -= 1; CounterEffect::None },
-///         CounterAction::Set(n) => |state| { state.count = n; CounterEffect::None },
+///         CounterAction::Increment => |state| state.count += 1,
+///         CounterAction::Decrement => |state| state.count -= 1,
+///         CounterAction::Set(n) => |state| state.count = n,
 ///     }
 /// }
 ///
@@ -471,11 +515,11 @@ where
 #[macro_export]
 macro_rules! reducer {
     (
-        $reducer_name:ident for $state_type:ty, $action_type:ty, $effect_type:ty {
+        $vis:vis $reducer_name:ident for $state_type:ty, $action_type:ty, $effect_type:ty {
             $( $pattern:pat => |$var:ident| $body:expr ),* $(,)?
         }
     ) => {
-        struct $reducer_name;
+        $vis struct $reducer_name;
 
         impl $crate::Reducer for $reducer_name {
             type State = $state_type;
@@ -488,7 +532,7 @@ macro_rules! reducer {
                     $(
                         $pattern => {
                             let $var = state;
-                            $body
+                            $crate::IntoEffect::into_effect($body)
                         }
                     ),*
                 }

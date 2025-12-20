@@ -19,6 +19,9 @@ impl Effect for TestEffect {
     fn is_unchanged(&self) -> bool {
         matches!(self, TestEffect::Unchanged)
     }
+    fn changed() -> Self {
+        TestEffect::None
+    }
 }
 
 // Test state and action types
@@ -311,13 +314,13 @@ enum MacroAction {
     Reset,
 }
 
-// Generate reducer using macro
+// Generate reducer using macro - implicit effect returns
 reducto::reducer! {
     MacroReducer for MacroState, MacroAction, TestEffect {
-        MacroAction::Add(n) => |state| { state.value += n; TestEffect::None },
-        MacroAction::Subtract(n) => |state| { state.value -= n; TestEffect::None },
-        MacroAction::SetName(s) => |state| { state.name = s; TestEffect::None },
-        MacroAction::Reset => |state| { *state = MacroState::default(); TestEffect::None },
+        MacroAction::Add(n) => |state| state.value += n,
+        MacroAction::Subtract(n) => |state| state.value -= n,
+        MacroAction::SetName(s) => |state| state.name = s,
+        MacroAction::Reset => |state| *state = MacroState::default(),
     }
 }
 
@@ -421,6 +424,9 @@ enum AppEffect {
 impl Effect for AppEffect {
     fn is_unchanged(&self) -> bool {
         matches!(self, AppEffect::Unchanged)
+    }
+    fn changed() -> Self {
+        AppEffect::None
     }
 }
 

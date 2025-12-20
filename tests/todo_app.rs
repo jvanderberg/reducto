@@ -19,6 +19,9 @@ impl Effect for TodoEffect {
     fn is_unchanged(&self) -> bool {
         matches!(self, TodoEffect::Unchanged)
     }
+    fn changed() -> Self {
+        TodoEffect::None
+    }
 }
 
 // ============================================================================
@@ -359,6 +362,9 @@ enum TodoEffectWithSave {
 impl Effect for TodoEffectWithSave {
     fn is_unchanged(&self) -> bool {
         matches!(self, TodoEffectWithSave::Unchanged)
+    }
+    fn changed() -> Self {
+        TodoEffectWithSave::None
     }
 }
 

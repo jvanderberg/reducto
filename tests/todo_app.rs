@@ -3,7 +3,7 @@
 //! Demonstrates: State, Actions, Reducer, TextView rendering, Effect-based side effects
 
 use core::fmt::Write;
-use reducto::{App, Effect, Reducer, Store, TextView, View};
+use reducto::{App, Effect, Reducer, TextView, View};
 
 // ============================================================================
 // Effect type for Todo app
@@ -190,110 +190,87 @@ impl View for TodoView {
 
 #[test]
 fn todo_app_full_workflow() {
-    let mut store: Store<TodoState, TodoAction, 16> = Store::new(TodoState::default());
-    let mut view = TodoView::new();
-    let mut render_count = 0;
+    let mut app: App<TodoState, TodoAction, TodoReducer, TodoView> =
+        App::new(TodoView::new(), TodoState::default());
 
-    // Helper to dispatch and render if changed
-    let mut dispatch = |store: &mut Store<TodoState, TodoAction, 16>,
-                        view: &mut TodoView,
-                        action: TodoAction|
-     -> bool {
-        let effect = store.dispatch::<TodoReducer>(action);
-        let changed = !effect.is_unchanged();
-        if changed {
-            view.render(store.state());
-            render_count += 1;
-        }
-        changed
-    };
-
-    // Initial render
-    view.render(store.state());
-    assert!(view.text().contains("(no items)"));
+    // Initial state - add an empty task (no-op) to check initial behavior
+    let empty = heapless::String::<32>::new();
+    let effect = app.dispatch(TodoAction::Add(empty.clone()));
+    assert!(effect.is_unchanged()); // empty text doesn't add
 
     // Add some todos
     let mut text = heapless::String::<32>::new();
     text.push_str("Buy milk").ok();
-    assert!(dispatch(&mut store, &mut view, TodoAction::Add(text)));
-    assert!(view.text().contains("[ ] Buy milk"));
+    let effect = app.dispatch(TodoAction::Add(text));
+    assert!(!effect.is_unchanged());
+    assert!(app.view().text().contains("[ ] Buy milk"));
 
     let mut text = heapless::String::<32>::new();
     text.push_str("Write code").ok();
-    assert!(dispatch(&mut store, &mut view, TodoAction::Add(text)));
+    app.dispatch(TodoAction::Add(text));
 
     let mut text = heapless::String::<32>::new();
     text.push_str("Test reducto").ok();
-    assert!(dispatch(&mut store, &mut view, TodoAction::Add(text)));
+    app.dispatch(TodoAction::Add(text));
 
-    assert_eq!(store.state().todos.len(), 3);
-    assert!(view.text().contains("3 active, 0 completed"));
+    assert_eq!(app.state().todos.len(), 3);
+    assert!(app.view().text().contains("3 active, 0 completed"));
 
     // Toggle one complete
-    assert!(dispatch(&mut store, &mut view, TodoAction::Toggle(1)));
-    assert!(view.text().contains("[x] Write code"));
-    assert!(view.text().contains("2 active, 1 completed"));
+    app.dispatch(TodoAction::Toggle(1));
+    assert!(app.view().text().contains("[x] Write code"));
+    assert!(app.view().text().contains("2 active, 1 completed"));
 
     // Filter to active only
-    assert!(dispatch(
-        &mut store,
-        &mut view,
-        TodoAction::SetFilter(Filter::Active)
-    ));
-    assert!(view.text().contains("Filter: Active"));
-    assert!(!view.text().contains("Write code")); // completed, shouldn't show
-    assert!(view.text().contains("Buy milk"));
+    app.dispatch(TodoAction::SetFilter(Filter::Active));
+    assert!(app.view().text().contains("Filter: Active"));
+    assert!(!app.view().text().contains("Write code")); // completed, shouldn't show
+    assert!(app.view().text().contains("Buy milk"));
 
     // Filter to completed only
-    assert!(dispatch(
-        &mut store,
-        &mut view,
-        TodoAction::SetFilter(Filter::Completed)
-    ));
-    assert!(view.text().contains("[x] Write code"));
-    assert!(!view.text().contains("Buy milk")); // active, shouldn't show
+    app.dispatch(TodoAction::SetFilter(Filter::Completed));
+    assert!(app.view().text().contains("[x] Write code"));
+    assert!(!app.view().text().contains("Buy milk")); // active, shouldn't show
 
     // Back to all
-    assert!(dispatch(
-        &mut store,
-        &mut view,
-        TodoAction::SetFilter(Filter::All)
-    ));
-    assert!(view.text().contains("Buy milk"));
-    assert!(view.text().contains("Write code"));
+    app.dispatch(TodoAction::SetFilter(Filter::All));
+    assert!(app.view().text().contains("Buy milk"));
+    assert!(app.view().text().contains("Write code"));
 
     // Delete a todo
-    assert!(dispatch(&mut store, &mut view, TodoAction::Delete(0)));
-    assert!(!view.text().contains("Buy milk"));
-    assert_eq!(store.state().todos.len(), 2);
+    app.dispatch(TodoAction::Delete(0));
+    assert!(!app.view().text().contains("Buy milk"));
+    assert_eq!(app.state().todos.len(), 2);
 
     // Clear completed
-    assert!(dispatch(&mut store, &mut view, TodoAction::ClearCompleted));
-    assert!(!view.text().contains("Write code"));
-    assert_eq!(store.state().todos.len(), 1);
-    assert!(view.text().contains("Test reducto"));
+    app.dispatch(TodoAction::ClearCompleted);
+    assert!(!app.view().text().contains("Write code"));
+    assert_eq!(app.state().todos.len(), 1);
+    assert!(app.view().text().contains("Test reducto"));
 
-    // No-op actions shouldn't trigger render
-    let empty = heapless::String::<32>::new();
-    assert!(!dispatch(&mut store, &mut view, TodoAction::Add(empty)));
+    // No-op actions shouldn't change state
+    let effect = app.dispatch(TodoAction::Add(empty));
+    assert!(effect.is_unchanged());
 
-    assert!(!dispatch(&mut store, &mut view, TodoAction::Toggle(999))); // non-existent
-    assert!(!dispatch(&mut store, &mut view, TodoAction::Delete(999)));
-    assert!(!dispatch(
-        &mut store,
-        &mut view,
-        TodoAction::SetFilter(Filter::All)
-    )); // already set
-    assert!(!dispatch(&mut store, &mut view, TodoAction::ClearCompleted)); // none completed
+    let effect = app.dispatch(TodoAction::Toggle(999)); // non-existent
+    assert!(effect.is_unchanged());
 
-    println!("Final view:\n{}", view.text());
-    println!("Total renders: {}", render_count);
+    let effect = app.dispatch(TodoAction::Delete(999));
+    assert!(effect.is_unchanged());
+
+    let effect = app.dispatch(TodoAction::SetFilter(Filter::All)); // already set
+    assert!(effect.is_unchanged());
+
+    let effect = app.dispatch(TodoAction::ClearCompleted); // none completed
+    assert!(effect.is_unchanged());
+
+    println!("Final view:\n{}", app.view().text());
 }
 
 #[test]
 fn todo_app_with_queue() {
-    let mut store: Store<TodoState, TodoAction, 16> = Store::new(TodoState::default());
-    let mut view = TodoView::new();
+    let mut app: App<TodoState, TodoAction, TodoReducer, TodoView> =
+        App::new(TodoView::new(), TodoState::default());
 
     // Simulate ISR-style: enqueue multiple actions
     let mut t1 = heapless::String::<32>::new();
@@ -301,23 +278,16 @@ fn todo_app_with_queue() {
     let mut t2 = heapless::String::<32>::new();
     t2.push_str("Task 2").ok();
 
-    store.enqueue(TodoAction::Add(t1)).ok();
-    store.enqueue(TodoAction::Add(t2)).ok();
-    store.enqueue(TodoAction::Toggle(0)).ok();
+    app.enqueue(TodoAction::Add(t1)).ok();
+    app.enqueue(TodoAction::Add(t2)).ok();
+    app.enqueue(TodoAction::Toggle(0)).ok();
 
-    // Process queue manually
-    let mut changes = 0;
-    while let Some(action) = store.pop_action() {
-        let effect = store.dispatch::<TodoReducer>(action);
-        if !effect.is_unchanged() {
-            view.render(store.state());
-            changes += 1;
-        }
-    }
+    // Process queue
+    let effects = app.process_queue();
 
-    assert_eq!(changes, 3);
-    assert!(view.text().contains("[x] Task 1"));
-    assert!(view.text().contains("[ ] Task 2"));
+    assert_eq!(effects.len(), 3);
+    assert!(app.view().text().contains("[x] Task 1"));
+    assert!(app.view().text().contains("[ ] Task 2"));
 }
 
 // ============================================================================
@@ -325,11 +295,10 @@ fn todo_app_with_queue() {
 // ============================================================================
 
 #[test]
-fn todo_app_with_static_app() {
+fn todo_app_with_app() {
     let mut app: App<TodoState, TodoAction, TodoReducer, TodoView> =
         App::new(TodoView::new(), TodoState::default());
 
-    // App renders on dispatch, so initially the view is empty
     // Add tasks - App handles rendering internally
     let mut text = heapless::String::<32>::new();
     text.push_str("Learn Rust").ok();

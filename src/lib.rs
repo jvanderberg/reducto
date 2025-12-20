@@ -183,91 +183,6 @@ pub trait Reducer {
     fn reduce(state: &mut Self::State, action: Self::Action) -> Self::Effect;
 }
 
-/// Store holds application state and an action queue.
-///
-/// The Store is responsible for:
-/// - Holding the current state
-/// - Queueing actions (typically from ISRs)
-/// - Dispatching queued actions through the reducer
-/// - Returning effects for side effect handling
-///
-/// # Queue Design
-///
-/// ISRs and other event sources call `enqueue()` to add actions.
-/// The main loop calls `process_queue()` to drain all queued actions.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// // In ISR:
-/// store.enqueue(Action::ButtonPressed).ok();
-///
-/// // In main loop:
-/// while let Some(action) = store.pop_action() {
-///     let effect = store.dispatch::<MyReducer>(action);
-///     match effect {
-///         Effect::Save => save_state(store.state()),
-///         _ => {}
-///     }
-/// }
-/// ```
-pub struct Store<S, A, const N: usize = 8> {
-    state: S,
-    queue: heapless::Deque<A, N>,
-}
-
-impl<S, A, const N: usize> Store<S, A, N> {
-    /// Create a new store with the given initial state and empty action queue.
-    pub fn new(initial: S) -> Self {
-        Self {
-            state: initial,
-            queue: heapless::Deque::new(),
-        }
-    }
-
-    /// Get a reference to the current state.
-    pub fn state(&self) -> &S {
-        &self.state
-    }
-
-    /// Get a mutable reference to the current state.
-    pub fn state_mut(&mut self) -> &mut S {
-        &mut self.state
-    }
-
-    /// Enqueue an action for later processing.
-    ///
-    /// Call this from ISRs or event handlers. Returns `Err(action)` if
-    /// the queue is full.
-    ///
-    /// Note: For ISR safety, wrap the Store in appropriate synchronization
-    /// primitives (e.g., `Mutex<RefCell<Store>>` or use Embassy channels).
-    pub fn enqueue(&mut self, action: A) -> Result<(), A> {
-        self.queue.push_back(action)
-    }
-
-    /// Check if the action queue is empty.
-    pub fn is_queue_empty(&self) -> bool {
-        self.queue.is_empty()
-    }
-
-    /// Pop the next action from the queue, if any.
-    ///
-    /// Used by `run_loop` to process actions one at a time.
-    pub fn pop_action(&mut self) -> Option<A> {
-        self.queue.pop_front()
-    }
-
-    /// Dispatch a single action through the reducer immediately.
-    ///
-    /// Returns the Effect from the reducer. State is mutated in-place.
-    pub fn dispatch<R>(&mut self, action: A) -> R::Effect
-    where
-        R: Reducer<State = S, Action = A>,
-    {
-        R::reduce(&mut self.state, action)
-    }
-}
 
 /// View renders state to some output.
 ///
@@ -377,45 +292,53 @@ impl<const N: usize> Default for TextView<N> {
     }
 }
 
-/// An application that owns its state and view.
+/// An application that owns its state, view, and action queue.
 ///
 /// App provides the recommended way to structure an embedded application.
 /// It owns the state and view, providing a clean `dispatch()` API that
 /// automatically renders when state changes.
 ///
-/// State is mutated in-place for zero-copy performance.
+/// ## Two Dispatch Patterns
 ///
-/// # Example
-///
+/// **Direct dispatch** - for async runtimes (embassy) where actions come through channels:
 /// ```rust,ignore
-/// let mut app = App::<AppState, Action, AppReducer, AppView>::new(
-///     AppView::new(),
-///     AppState::default(),
-/// );
-///
 /// loop {
-///     let action = get_action();
-///     let effect = app.dispatch(action);  // Renders internally if changed
-///
-///     match effect {
-///         Effect::Save => storage::save(app.state()),
-///         Effect::StartAnimation => led::start_animation(),
-///         _ => {}
-///     }
+///     let action = ACTION_CHANNEL.receive().await;
+///     let effect = app.dispatch(action);
+///     // handle effect...
 /// }
 /// ```
-pub struct App<S, A, R, V>
+///
+/// **Queue dispatch** - for bare-metal ISRs where you need fast enqueue:
+/// ```rust,ignore
+/// // In ISR (fast - just enqueue):
+/// critical_section::with(|cs| {
+///     APP.borrow_ref_mut(cs).enqueue(Action::ButtonPressed).ok();
+/// });
+///
+/// // In main loop (process all queued actions):
+/// critical_section::with(|cs| {
+///     let effects = APP.borrow_ref_mut(cs).process_queue();
+///     for effect in effects {
+///         // handle effect...
+///     }
+/// });
+/// ```
+///
+/// The queue pattern keeps ISRs fast by deferring the actual dispatch+render
+/// to the main loop.
+pub struct App<S, A, R, V, const Q: usize = 8>
 where
     R: Reducer<State = S, Action = A>,
     V: View<State = S>,
 {
     state: S,
     view: V,
+    queue: heapless::Deque<A, Q>,
     _reducer: PhantomData<R>,
-    _action: PhantomData<A>,
 }
 
-impl<S, A, R, V> App<S, A, R, V>
+impl<S, A, R, V, const Q: usize> App<S, A, R, V, Q>
 where
     R: Reducer<State = S, Action = A>,
     V: View<State = S>,
@@ -425,23 +348,74 @@ where
         Self {
             state: initial_state,
             view,
+            queue: heapless::Deque::new(),
             _reducer: PhantomData,
-            _action: PhantomData,
         }
     }
 
-    /// Dispatch an action through the reducer.
+    /// Dispatch an action immediately through the reducer.
     ///
     /// The view is automatically rendered if the effect indicates state changed
     /// (i.e., `effect.is_unchanged()` returns false).
     ///
     /// Returns the Effect from the reducer for side effect handling.
+    ///
+    /// Use this when actions come from an async channel (embassy pattern).
     pub fn dispatch(&mut self, action: A) -> R::Effect {
         let effect = R::reduce(&mut self.state, action);
         if !effect.is_unchanged() {
             self.view.render(&self.state);
         }
         effect
+    }
+
+    /// Enqueue an action for later processing.
+    ///
+    /// Use this from ISRs or interrupt handlers where you want to keep
+    /// execution time minimal. The action will be processed when
+    /// `process_queue()` is called from the main loop.
+    ///
+    /// Returns `Err(action)` if the queue is full.
+    ///
+    /// Note: For ISR safety, wrap the App in `critical_section::Mutex<RefCell<App>>`.
+    pub fn enqueue(&mut self, action: A) -> Result<(), A> {
+        self.queue.push_back(action)
+    }
+
+    /// Process all queued actions.
+    ///
+    /// Dispatches each queued action through the reducer, rendering after
+    /// each state change. Returns a list of effects for the main loop to handle.
+    ///
+    /// Call this from your main loop after ISRs have enqueued actions.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// loop {
+    ///     // Wait for interrupt or timeout...
+    ///
+    ///     let effects = app.process_queue();
+    ///     for effect in effects {
+    ///         match effect {
+    ///             AppEffect::Save => storage::save(app.state()),
+    ///             _ => {}
+    ///         }
+    ///     }
+    /// }
+    /// ```
+    pub fn process_queue(&mut self) -> heapless::Vec<R::Effect, Q> {
+        let mut effects = heapless::Vec::new();
+        while let Some(action) = self.queue.pop_front() {
+            let effect = self.dispatch(action);
+            effects.push(effect).ok();
+        }
+        effects
+    }
+
+    /// Check if the action queue is empty.
+    pub fn is_queue_empty(&self) -> bool {
+        self.queue.is_empty()
     }
 
     /// Get a reference to the current state.
@@ -485,7 +459,7 @@ where
 /// # Example
 ///
 /// ```rust
-/// use reducto::{Effect, Reducer, Store};
+/// use reducto::{Effect, Reducer, App, View, TextView};
 ///
 /// #[derive(Default)]
 /// struct Counter { count: i32 }
@@ -508,9 +482,17 @@ where
 ///     }
 /// }
 ///
-/// let mut store: Store<Counter, CounterAction> = Store::new(Counter::default());
-/// store.dispatch::<CounterReducer>(CounterAction::Increment);
-/// assert_eq!(store.state().count, 1);
+/// struct CounterView;
+/// impl View for CounterView {
+///     type State = Counter;
+///     fn render(&mut self, _: &Counter) {}
+///     fn text(&self) -> &str { "" }
+/// }
+///
+/// let mut app: App<Counter, CounterAction, CounterReducer, CounterView> =
+///     App::new(CounterView, Counter::default());
+/// app.dispatch(CounterAction::Increment);
+/// assert_eq!(app.state().count, 1);
 /// ```
 #[macro_export]
 macro_rules! reducer {

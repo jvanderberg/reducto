@@ -3,10 +3,26 @@
 //! TDD: Write failing tests first (RED), then implement to pass (GREEN)
 
 use core::fmt::Write;
-use reducto::{Application, Outcome, Reducer, Store, TextView, View, changed, unchanged};
+use reducto::{App, Effect, Reducer, Store, TextView, View};
+
+// ============================================================================
+// Common Effect type for tests
+// ============================================================================
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TestEffect {
+    None,
+    Unchanged,
+}
+
+impl Effect for TestEffect {
+    fn is_unchanged(&self) -> bool {
+        matches!(self, TestEffect::Unchanged)
+    }
+}
 
 // Test state and action types
-#[derive(Clone, PartialEq, Debug, Default)]
+#[derive(Debug, Default)]
 struct TestState {
     count: i32,
 }
@@ -24,21 +40,22 @@ struct TestReducer;
 impl Reducer for TestReducer {
     type State = TestState;
     type Action = TestAction;
+    type Effect = TestEffect;
 
-    fn reduce(mut state: Self::State, action: Self::Action) -> Outcome<Self::State> {
+    fn reduce(state: &mut Self::State, action: Self::Action) -> Self::Effect {
         match action {
             TestAction::Increment => {
                 state.count += 1;
-                Outcome::changed(state)
+                TestEffect::None
             }
             TestAction::Decrement => {
                 state.count -= 1;
-                Outcome::changed(state)
+                TestEffect::None
             }
-            TestAction::Set(val) if val == state.count => Outcome::Unchanged(state),
+            TestAction::Set(val) if val == state.count => TestEffect::Unchanged,
             TestAction::Set(val) => {
                 state.count = val;
-                Outcome::changed(state)
+                TestEffect::None
             }
         }
     }
@@ -54,20 +71,20 @@ fn store_new_creates_with_initial_state() {
 fn store_dispatch_updates_state() {
     let mut store: Store<TestState, TestAction, 8> = Store::new(TestState::default());
 
-    let changed = store.dispatch::<TestReducer>(TestAction::Increment);
+    let effect = store.dispatch::<TestReducer>(TestAction::Increment);
 
-    assert!(changed);
+    assert_eq!(effect, TestEffect::None);
     assert_eq!(store.state().count, 1);
 }
 
 #[test]
-fn store_dispatch_returns_false_when_state_unchanged() {
+fn store_dispatch_returns_unchanged_when_state_unchanged() {
     let mut store: Store<TestState, TestAction, 8> = Store::new(TestState { count: 5 });
 
-    // Setting to same value should return false
-    let changed = store.dispatch::<TestReducer>(TestAction::Set(5));
+    // Setting to same value should return Unchanged
+    let effect = store.dispatch::<TestReducer>(TestAction::Set(5));
 
-    assert!(!changed);
+    assert_eq!(effect, TestEffect::Unchanged);
     assert_eq!(store.state().count, 5);
 }
 
@@ -93,35 +110,41 @@ fn store_enqueue_fails_when_queue_full() {
 }
 
 #[test]
-fn store_process_queue_dispatches_all_actions() {
+fn store_processes_queue_dispatches_all_actions() {
     let mut store: Store<TestState, TestAction, 8> = Store::new(TestState::default());
 
     store.enqueue(TestAction::Increment).unwrap();
     store.enqueue(TestAction::Increment).unwrap();
     store.enqueue(TestAction::Set(10)).unwrap();
 
-    let changes = store.process_queue::<TestReducer>();
+    let mut changes = 0;
+    while let Some(action) = store.pop_action() {
+        let effect = store.dispatch::<TestReducer>(action);
+        if !effect.is_unchanged() {
+            changes += 1;
+        }
+    }
 
-    assert_eq!(changes, 3);  // 3 state changes
+    assert_eq!(changes, 3); // 3 state changes
     assert_eq!(store.state().count, 10);
     assert!(store.is_queue_empty());
 }
 
 #[test]
 fn reducer_handles_all_variants() {
-    let state = TestState { count: 10 };
+    let mut state = TestState { count: 10 };
 
-    let (inc, changed) = TestReducer::reduce(state.clone(), TestAction::Increment).into_parts();
-    assert_eq!(inc.count, 11);
-    assert!(changed);
+    let effect = TestReducer::reduce(&mut state, TestAction::Increment);
+    assert_eq!(state.count, 11);
+    assert!(!effect.is_unchanged());
 
-    let (dec, changed) = TestReducer::reduce(state.clone(), TestAction::Decrement).into_parts();
-    assert_eq!(dec.count, 9);
-    assert!(changed);
+    let effect = TestReducer::reduce(&mut state, TestAction::Decrement);
+    assert_eq!(state.count, 10);
+    assert!(!effect.is_unchanged());
 
-    let (set, changed) = TestReducer::reduce(state, TestAction::Set(100)).into_parts();
-    assert_eq!(set.count, 100);
-    assert!(changed);
+    let effect = TestReducer::reduce(&mut state, TestAction::Set(100));
+    assert_eq!(state.count, 100);
+    assert!(!effect.is_unchanged());
 }
 
 // ============================================================================
@@ -135,7 +158,9 @@ struct CounterView {
 
 impl CounterView {
     fn new() -> Self {
-        Self { buffer: TextView::new() }
+        Self {
+            buffer: TextView::new(),
+        }
     }
 }
 
@@ -191,7 +216,7 @@ fn text_view_clear_works() {
 }
 
 // ============================================================================
-// Application trait tests
+// App tests
 // ============================================================================
 
 /// Test view that renders count to text buffer
@@ -223,99 +248,47 @@ impl View for TestAppView {
     }
 }
 
-/// Test application that records interactions for verification
-struct TestApp {
-    view: TestAppView,
-    /// Number of times tick was called
-    tick_count: usize,
-}
+#[test]
+fn static_app_dispatch_renders_and_returns_effect() {
+    let view = TestAppView::new();
+    let mut app: App<TestState, TestAction, TestReducer, _> =
+        App::new(view, TestState { count: 5 });
 
-impl TestApp {
-    fn new() -> Self {
-        Self {
-            view: TestAppView::new(),
-            tick_count: 0,
-        }
-    }
-}
+    let effect = app.dispatch(TestAction::Increment);
 
-impl Application for TestApp {
-    type State = TestState;
-    type Action = TestAction;
-    type Reducer = TestReducer;
-    type View = TestAppView;
-
-    fn view(&mut self) -> &mut Self::View {
-        &mut self.view
-    }
-
-    fn tick(&mut self) {
-        self.tick_count += 1;
-    }
+    assert_eq!(effect, TestEffect::None);
+    assert_eq!(app.state().count, 6);
+    assert_eq!(app.view().render_count, 1);
+    assert!(app.view().text().contains("Count: 6"));
 }
 
 #[test]
-fn application_renders_when_state_changes() {
-    let mut app = TestApp::new();
-    let mut store: Store<TestState, TestAction, 8> = Store::new(TestState::default());
+fn static_app_unchanged_skips_render() {
+    let view = TestAppView::new();
+    let mut app: App<TestState, TestAction, TestReducer, _> =
+        App::new(view, TestState { count: 10 });
 
-    // Enqueue action (simulating ISR)
-    store.enqueue(TestAction::Increment).unwrap();
+    // Setting to same value returns unchanged - should NOT render
+    let effect = app.dispatch(TestAction::Set(10));
 
-    // Simulate one iteration of run_loop
-    app.tick();
-    while let Some(action) = store.pop_action() {
-        if store.dispatch::<TestReducer>(action) {
-            app.view().render(store.state());
-        }
-    }
-
-    assert_eq!(app.view.render_count, 1);
-    assert!(app.view().text().contains("Count: 1"));
+    assert_eq!(effect, TestEffect::Unchanged);
+    assert_eq!(app.state().count, 10);
+    assert_eq!(app.view().render_count, 0); // No render!
 }
 
 #[test]
-fn application_does_not_render_when_state_unchanged() {
-    let mut app = TestApp::new();
-    let mut store: Store<TestState, TestAction, 8> = Store::new(TestState::default());
+fn static_app_processes_multiple_actions() {
+    let view = TestAppView::new();
+    let mut app: App<TestState, TestAction, TestReducer, _> =
+        App::new(view, TestState::default());
 
-    // Enqueue action that sets to same value (state won't change)
-    store.enqueue(TestAction::Set(0)).unwrap();
+    app.dispatch(TestAction::Increment);
+    app.dispatch(TestAction::Increment);
+    app.dispatch(TestAction::Set(100));
 
-    // Simulate one iteration
-    app.tick();
-    while let Some(action) = store.pop_action() {
-        if store.dispatch::<TestReducer>(action) {
-            app.view().render(store.state());
-        }
-    }
-
-    // State didn't change, so render should NOT have been called
-    assert_eq!(app.view.render_count, 0);
-}
-
-#[test]
-fn application_processes_multiple_queued_actions() {
-    let mut app = TestApp::new();
-    let mut store: Store<TestState, TestAction, 8> = Store::new(TestState::default());
-
-    // Enqueue multiple actions (simulating multiple ISR events)
-    store.enqueue(TestAction::Increment).unwrap();
-    store.enqueue(TestAction::Increment).unwrap();
-    store.enqueue(TestAction::Set(100)).unwrap();
-
-    // Single iteration processes all queued actions
-    app.tick();
-    while let Some(action) = store.pop_action() {
-        if store.dispatch::<TestReducer>(action) {
-            app.view().render(store.state());
-        }
-    }
-
-    assert_eq!(app.tick_count, 1);
-    assert_eq!(app.view.render_count, 3);  // 3 state changes = 3 renders
-    assert_eq!(store.state().count, 100);  // Final state
-    assert!(app.view().text().contains("Count: 100"));  // Final render
+    assert_eq!(app.state().count, 100);
+    assert_eq!(app.view().render_count, 3);
+    assert!(app.view().text().contains("Count: 100"));
 }
 
 // ============================================================================
@@ -323,7 +296,7 @@ fn application_processes_multiple_queued_actions() {
 // ============================================================================
 
 // State for macro-generated reducer
-#[derive(Clone, PartialEq, Debug, Default)]
+#[derive(Debug, Default)]
 struct MacroState {
     value: i32,
     name: &'static str,
@@ -340,73 +313,55 @@ enum MacroAction {
 
 // Generate reducer using macro
 reducto::reducer! {
-    MacroReducer for MacroState, MacroAction {
-        MacroAction::Add(n) => |state| MacroState { value: state.value + n, ..state },
-        MacroAction::Subtract(n) => |state| MacroState { value: state.value - n, ..state },
-        MacroAction::SetName(s) => |state| MacroState { name: s, ..state },
-        MacroAction::Reset => |_state| MacroState::default(),
+    MacroReducer for MacroState, MacroAction, TestEffect {
+        MacroAction::Add(n) => |state| { state.value += n; TestEffect::None },
+        MacroAction::Subtract(n) => |state| { state.value -= n; TestEffect::None },
+        MacroAction::SetName(s) => |state| { state.name = s; TestEffect::None },
+        MacroAction::Reset => |state| { *state = MacroState::default(); TestEffect::None },
     }
 }
 
 #[test]
 fn macro_reducer_handles_all_variants() {
-    let state = MacroState { value: 10, name: "test" };
+    let mut state = MacroState {
+        value: 10,
+        name: "test",
+    };
 
-    let (added, _) = MacroReducer::reduce(state.clone(), MacroAction::Add(5)).into_parts();
-    assert_eq!(added.value, 15);
-    assert_eq!(added.name, "test");
+    MacroReducer::reduce(&mut state, MacroAction::Add(5));
+    assert_eq!(state.value, 15);
+    assert_eq!(state.name, "test");
 
-    let (subtracted, _) = MacroReducer::reduce(state.clone(), MacroAction::Subtract(3)).into_parts();
-    assert_eq!(subtracted.value, 7);
+    MacroReducer::reduce(&mut state, MacroAction::Subtract(3));
+    assert_eq!(state.value, 12);
 
-    let (named, _) = MacroReducer::reduce(state.clone(), MacroAction::SetName("new")).into_parts();
-    assert_eq!(named.name, "new");
-    assert_eq!(named.value, 10);
+    MacroReducer::reduce(&mut state, MacroAction::SetName("new"));
+    assert_eq!(state.name, "new");
+    assert_eq!(state.value, 12);
 
-    let (reset, _) = MacroReducer::reduce(state, MacroAction::Reset).into_parts();
-    assert_eq!(reset.value, 0);
-    assert_eq!(reset.name, "");
+    MacroReducer::reduce(&mut state, MacroAction::Reset);
+    assert_eq!(state.value, 0);
+    assert_eq!(state.name, "");
 }
 
 #[test]
 fn macro_reducer_works_with_store() {
     let mut store: Store<MacroState, MacroAction, 8> = Store::new(MacroState::default());
 
-    let changed = store.dispatch::<MacroReducer>(MacroAction::Add(42));
-    assert!(changed);
+    let effect = store.dispatch::<MacroReducer>(MacroAction::Add(42));
+    assert!(!effect.is_unchanged());
     assert_eq!(store.state().value, 42);
 
-    let changed = store.dispatch::<MacroReducer>(MacroAction::SetName("hello"));
-    assert!(changed);
+    let effect = store.dispatch::<MacroReducer>(MacroAction::SetName("hello"));
+    assert!(!effect.is_unchanged());
     assert_eq!(store.state().name, "hello");
 }
 
 // ============================================================================
-// Macro with unchanged() DSL tests
+// Effect-based conditional reducer tests
 // ============================================================================
 
-#[derive(Clone, PartialEq, Debug, Default)]
-struct DslState {
-    count: i32,
-}
-
-#[derive(Clone, Debug)]
-enum DslAction {
-    Increment,
-    SetCount(i32),
-}
-
-// Using unchanged() function for no-op arms
-reducto::reducer! {
-    DslReducer for DslState, DslAction {
-        DslAction::Increment => |state| DslState { count: state.count + 1 },
-        // Always returns unchanged for this test
-        DslAction::SetCount(_n) => |state| unchanged(state),
-    }
-}
-
-// Demonstrates if/else with changed()/unchanged() - both branches have same type
-#[derive(Clone, PartialEq, Debug, Default)]
+#[derive(Debug, Default)]
 struct ConditionalState {
     value: i32,
 }
@@ -416,31 +371,22 @@ enum ConditionalAction {
     SetValue(i32),
 }
 
-reducto::reducer! {
-    ConditionalReducer for ConditionalState, ConditionalAction {
-        ConditionalAction::SetValue(n) => |state| {
-            if n == state.value {
-                unchanged(state)
-            } else {
-                changed(ConditionalState { value: n })
+struct ConditionalReducer;
+
+impl Reducer for ConditionalReducer {
+    type State = ConditionalState;
+    type Action = ConditionalAction;
+    type Effect = TestEffect;
+
+    fn reduce(state: &mut Self::State, action: Self::Action) -> Self::Effect {
+        match action {
+            ConditionalAction::SetValue(n) if n == state.value => TestEffect::Unchanged,
+            ConditionalAction::SetValue(n) => {
+                state.value = n;
+                TestEffect::None
             }
-        },
+        }
     }
-}
-
-#[test]
-fn macro_unchanged_dsl_skips_callback() {
-    let mut store: Store<DslState, DslAction, 8> = Store::new(DslState { count: 5 });
-
-    // SetCount uses unchanged() - returns false, state untouched
-    let changed = store.dispatch::<DslReducer>(DslAction::SetCount(99));
-    assert!(!changed);
-    assert_eq!(store.state().count, 5);
-
-    // Increment is normal - returns true, state updated
-    let changed = store.dispatch::<DslReducer>(DslAction::Increment);
-    assert!(changed);
-    assert_eq!(store.state().count, 6);
 }
 
 #[test]
@@ -448,68 +394,150 @@ fn conditional_reducer_if_else_works() {
     let mut store: Store<ConditionalState, ConditionalAction, 8> =
         Store::new(ConditionalState { value: 10 });
 
-    // Setting to same value - unchanged() branch
-    let did_change = store.dispatch::<ConditionalReducer>(ConditionalAction::SetValue(10));
-    assert!(!did_change);
+    // Setting to same value - unchanged
+    let effect = store.dispatch::<ConditionalReducer>(ConditionalAction::SetValue(10));
+    assert!(effect.is_unchanged());
     assert_eq!(store.state().value, 10);
 
-    // Setting to different value - changed() branch
-    let did_change = store.dispatch::<ConditionalReducer>(ConditionalAction::SetValue(42));
-    assert!(did_change);
+    // Setting to different value - changed
+    let effect = store.dispatch::<ConditionalReducer>(ConditionalAction::SetValue(42));
+    assert!(!effect.is_unchanged());
     assert_eq!(store.state().value, 42);
 }
 
 // ============================================================================
-// App double-buffering tests
+// Custom Effect with side effects tests
 // ============================================================================
 
-use reducto::App;
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum AppEffect {
+    Unchanged,
+    None,
+    Save,
+    StartAnimation,
+    StopAnimation,
+}
 
-#[test]
-fn app_dispatch_returns_old_and_new_state() {
-    let view = CounterView::new();
-    let mut app: App<TestState, TestAction, TestReducer, _> = App::new(view, TestState { count: 5 });
+impl Effect for AppEffect {
+    fn is_unchanged(&self) -> bool {
+        matches!(self, AppEffect::Unchanged)
+    }
+}
 
-    let result = app.dispatch(TestAction::Increment);
+#[derive(Debug, Default)]
+struct AppState {
+    brightness: u8,
+    animation_running: bool,
+}
 
-    assert!(result.changed);
-    assert_eq!(result.old.count, 5);
-    assert_eq!(result.new.count, 6);
-    assert_eq!(app.state().count, 6);
+#[derive(Clone, Debug)]
+enum AppAction {
+    BrightnessUp,
+    BrightnessDown,
+    ToggleAnimation,
+}
+
+struct AppReducer;
+
+impl Reducer for AppReducer {
+    type State = AppState;
+    type Action = AppAction;
+    type Effect = AppEffect;
+
+    fn reduce(state: &mut Self::State, action: Self::Action) -> Self::Effect {
+        match action {
+            AppAction::BrightnessUp if state.brightness >= 10 => AppEffect::Unchanged,
+            AppAction::BrightnessUp => {
+                state.brightness += 1;
+                AppEffect::Save
+            }
+            AppAction::BrightnessDown if state.brightness == 0 => AppEffect::Unchanged,
+            AppAction::BrightnessDown => {
+                state.brightness -= 1;
+                AppEffect::Save
+            }
+            AppAction::ToggleAnimation => {
+                state.animation_running = !state.animation_running;
+                if state.animation_running {
+                    AppEffect::StartAnimation
+                } else {
+                    AppEffect::StopAnimation
+                }
+            }
+        }
+    }
 }
 
 #[test]
-fn app_dispatch_unchanged_preserves_state() {
-    let view = CounterView::new();
-    let mut app: App<TestState, TestAction, TestReducer, _> = App::new(view, TestState { count: 10 });
+fn custom_effects_signal_side_effects() {
+    let mut store: Store<AppState, AppAction, 8> = Store::new(AppState::default());
 
-    // Setting to same value returns unchanged
-    let result = app.dispatch(TestAction::Set(10));
+    // Brightness up should signal Save
+    let effect = store.dispatch::<AppReducer>(AppAction::BrightnessUp);
+    assert_eq!(effect, AppEffect::Save);
+    assert_eq!(store.state().brightness, 1);
 
-    assert!(!result.changed);
-    assert_eq!(result.old.count, 10);
-    assert_eq!(result.new.count, 10);
+    // At max, should signal Unchanged
+    store.state_mut().brightness = 10;
+    let effect = store.dispatch::<AppReducer>(AppAction::BrightnessUp);
+    assert_eq!(effect, AppEffect::Unchanged);
+
+    // Toggle animation should signal StartAnimation
+    let effect = store.dispatch::<AppReducer>(AppAction::ToggleAnimation);
+    assert_eq!(effect, AppEffect::StartAnimation);
+    assert!(store.state().animation_running);
+
+    // Toggle again should signal StopAnimation
+    let effect = store.dispatch::<AppReducer>(AppAction::ToggleAnimation);
+    assert_eq!(effect, AppEffect::StopAnimation);
+    assert!(!store.state().animation_running);
 }
 
 #[test]
-fn app_dispatch_double_buffer_alternates() {
-    let view = CounterView::new();
-    let mut app: App<TestState, TestAction, TestReducer, _> = App::new(view, TestState { count: 0 });
+fn main_loop_handles_effects() {
+    struct MockView {
+        buffer: TextView<64>,
+    }
+    impl View for MockView {
+        type State = AppState;
+        fn render(&mut self, state: &Self::State) {
+            self.buffer.clear();
+            write!(self.buffer.buffer_mut(), "Brightness: {}", state.brightness).ok();
+        }
+        fn text(&self) -> &str {
+            self.buffer.as_str()
+        }
+    }
 
-    // First dispatch: old=0, new=1
-    let r1 = app.dispatch(TestAction::Increment);
-    assert_eq!(r1.old.count, 0);
-    assert_eq!(r1.new.count, 1);
+    let mut app: App<AppState, AppAction, AppReducer, MockView> = App::new(
+        MockView {
+            buffer: TextView::new(),
+        },
+        AppState::default(),
+    );
 
-    // Second dispatch: old=1, new=2
-    let r2 = app.dispatch(TestAction::Increment);
-    assert_eq!(r2.old.count, 1);
-    assert_eq!(r2.new.count, 2);
+    let mut save_count = 0;
+    let mut animation_started = false;
 
-    // Third dispatch: old=2, new=3
-    let r3 = app.dispatch(TestAction::Increment);
-    assert_eq!(r3.old.count, 2);
-    assert_eq!(r3.new.count, 3);
+    // Simulate main loop processing
+    let actions = [
+        AppAction::BrightnessUp,
+        AppAction::BrightnessUp,
+        AppAction::ToggleAnimation,
+    ];
 
-    assert_eq!(app.state().count, 3);
+    for action in actions {
+        let effect = app.dispatch(action);
+        match effect {
+            AppEffect::Save => save_count += 1,
+            AppEffect::StartAnimation => animation_started = true,
+            _ => {}
+        }
+    }
+
+    assert_eq!(save_count, 2);
+    assert!(animation_started);
+    assert_eq!(app.state().brightness, 2);
+    assert!(app.state().animation_running);
 }
+

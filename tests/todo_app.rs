@@ -1,9 +1,25 @@
 //! Todo App - integration test for reducto framework
 //!
-//! Demonstrates: State, Actions, Reducer, TextView rendering, Application trait
+//! Demonstrates: State, Actions, Reducer, TextView rendering, Effect-based side effects
 
 use core::fmt::Write;
-use reducto::{Application, Store, TextView, View, changed, process_iteration, unchanged};
+use reducto::{App, Effect, Reducer, Store, TextView, View};
+
+// ============================================================================
+// Effect type for Todo app
+// ============================================================================
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TodoEffect {
+    Unchanged,
+    None,
+}
+
+impl Effect for TodoEffect {
+    fn is_unchanged(&self) -> bool {
+        matches!(self, TodoEffect::Unchanged)
+    }
+}
 
 // ============================================================================
 // State
@@ -45,57 +61,66 @@ enum TodoAction {
 }
 
 // ============================================================================
-// Reducer (using macro with complex logic)
+// Reducer
 // ============================================================================
 
-reducto::reducer! {
-    TodoReducer for TodoState, TodoAction {
-        TodoAction::Add(text) => |state| {
-            if text.is_empty() {
-                return unchanged(state);
+struct TodoReducer;
+
+impl Reducer for TodoReducer {
+    type State = TodoState;
+    type Action = TodoAction;
+    type Effect = TodoEffect;
+
+    fn reduce(state: &mut Self::State, action: Self::Action) -> Self::Effect {
+        match action {
+            TodoAction::Add(text) => {
+                if text.is_empty() {
+                    return TodoEffect::Unchanged;
+                }
+                let todo = Todo {
+                    id: state.next_id,
+                    text,
+                    completed: false,
+                };
+                state.todos.push(todo).ok();
+                state.next_id += 1;
+                TodoEffect::None
             }
-            let todo = Todo {
-                id: state.next_id,
-                text,
-                completed: false,
-            };
-            state.todos.push(todo).ok();
-            state.next_id += 1;
-            changed(state)
-        },
-        TodoAction::Toggle(id) => |state| {
-            if let Some(todo) = state.todos.iter_mut().find(|t| t.id == id) {
-                todo.completed = !todo.completed;
-                changed(state)
-            } else {
-                unchanged(state)
+            TodoAction::Toggle(id) => {
+                if let Some(todo) = state.todos.iter_mut().find(|t| t.id == id) {
+                    todo.completed = !todo.completed;
+                    TodoEffect::None
+                } else {
+                    TodoEffect::Unchanged
+                }
             }
-        },
-        TodoAction::Delete(id) => |state| {
-            let original_len = state.todos.len();
-            state.todos.retain(|t| t.id != id);
-            if state.todos.len() != original_len {
-                changed(state)
-            } else {
-                unchanged(state)
+            TodoAction::Delete(id) => {
+                let original_len = state.todos.len();
+                state.todos.retain(|t| t.id != id);
+                if state.todos.len() != original_len {
+                    TodoEffect::None
+                } else {
+                    TodoEffect::Unchanged
+                }
             }
-        },
-        TodoAction::SetFilter(filter) => |state| {
-            if filter == state.filter {
-                unchanged(state)
-            } else {
-                changed(TodoState { filter, ..state })
+            TodoAction::SetFilter(filter) => {
+                if filter == state.filter {
+                    TodoEffect::Unchanged
+                } else {
+                    state.filter = filter;
+                    TodoEffect::None
+                }
             }
-        },
-        TodoAction::ClearCompleted => |state| {
-            let original_len = state.todos.len();
-            state.todos.retain(|t| !t.completed);
-            if state.todos.len() != original_len {
-                changed(state)
-            } else {
-                unchanged(state)
+            TodoAction::ClearCompleted => {
+                let original_len = state.todos.len();
+                state.todos.retain(|t| !t.completed);
+                if state.todos.len() != original_len {
+                    TodoEffect::None
+                } else {
+                    TodoEffect::Unchanged
+                }
             }
-        },
+        }
     }
 }
 
@@ -109,7 +134,9 @@ struct TodoView {
 
 impl TodoView {
     fn new() -> Self {
-        Self { buffer: TextView::new() }
+        Self {
+            buffer: TextView::new(),
+        }
     }
 }
 
@@ -167,13 +194,15 @@ fn todo_app_full_workflow() {
     // Helper to dispatch and render if changed
     let mut dispatch = |store: &mut Store<TodoState, TodoAction, 16>,
                         view: &mut TodoView,
-                        action: TodoAction| -> bool {
-        let did_change = store.dispatch::<TodoReducer>(action);
-        if did_change {
+                        action: TodoAction|
+     -> bool {
+        let effect = store.dispatch::<TodoReducer>(action);
+        let changed = !effect.is_unchanged();
+        if changed {
             view.render(store.state());
             render_count += 1;
         }
-        did_change
+        changed
     };
 
     // Initial render
@@ -203,18 +232,30 @@ fn todo_app_full_workflow() {
     assert!(view.text().contains("2 active, 1 completed"));
 
     // Filter to active only
-    assert!(dispatch(&mut store, &mut view, TodoAction::SetFilter(Filter::Active)));
+    assert!(dispatch(
+        &mut store,
+        &mut view,
+        TodoAction::SetFilter(Filter::Active)
+    ));
     assert!(view.text().contains("Filter: Active"));
     assert!(!view.text().contains("Write code")); // completed, shouldn't show
     assert!(view.text().contains("Buy milk"));
 
     // Filter to completed only
-    assert!(dispatch(&mut store, &mut view, TodoAction::SetFilter(Filter::Completed)));
+    assert!(dispatch(
+        &mut store,
+        &mut view,
+        TodoAction::SetFilter(Filter::Completed)
+    ));
     assert!(view.text().contains("[x] Write code"));
     assert!(!view.text().contains("Buy milk")); // active, shouldn't show
 
     // Back to all
-    assert!(dispatch(&mut store, &mut view, TodoAction::SetFilter(Filter::All)));
+    assert!(dispatch(
+        &mut store,
+        &mut view,
+        TodoAction::SetFilter(Filter::All)
+    ));
     assert!(view.text().contains("Buy milk"));
     assert!(view.text().contains("Write code"));
 
@@ -235,7 +276,11 @@ fn todo_app_full_workflow() {
 
     assert!(!dispatch(&mut store, &mut view, TodoAction::Toggle(999))); // non-existent
     assert!(!dispatch(&mut store, &mut view, TodoAction::Delete(999)));
-    assert!(!dispatch(&mut store, &mut view, TodoAction::SetFilter(Filter::All))); // already set
+    assert!(!dispatch(
+        &mut store,
+        &mut view,
+        TodoAction::SetFilter(Filter::All)
+    )); // already set
     assert!(!dispatch(&mut store, &mut view, TodoAction::ClearCompleted)); // none completed
 
     println!("Final view:\n{}", view.text());
@@ -257,10 +302,11 @@ fn todo_app_with_queue() {
     store.enqueue(TodoAction::Add(t2)).ok();
     store.enqueue(TodoAction::Toggle(0)).ok();
 
-    // Process queue manually (like run_loop does)
+    // Process queue manually
     let mut changes = 0;
     while let Some(action) = store.pop_action() {
-        if store.dispatch::<TodoReducer>(action) {
+        let effect = store.dispatch::<TodoReducer>(action);
+        if !effect.is_unchanged() {
             view.render(store.state());
             changes += 1;
         }
@@ -272,72 +318,136 @@ fn todo_app_with_queue() {
 }
 
 // ============================================================================
-// Application trait integration test
+// App integration test
 // ============================================================================
 
-struct TodoApp {
-    view: TodoView,
-    tick_count: usize,
+#[test]
+fn todo_app_with_static_app() {
+    let mut app: App<TodoState, TodoAction, TodoReducer, TodoView> =
+        App::new(TodoView::new(), TodoState::default());
+
+    // App renders on dispatch, so initially the view is empty
+    // Add tasks - App handles rendering internally
+    let mut text = heapless::String::<32>::new();
+    text.push_str("Learn Rust").ok();
+    let effect = app.dispatch(TodoAction::Add(text));
+    assert!(!effect.is_unchanged());
+
+    let mut text = heapless::String::<32>::new();
+    text.push_str("Build firmware").ok();
+    app.dispatch(TodoAction::Add(text));
+
+    app.dispatch(TodoAction::Toggle(0));
+
+    // Verify final state
+    assert!(app.view().text().contains("[x] Learn Rust"));
+    assert!(app.view().text().contains("[ ] Build firmware"));
+    assert!(app.view().text().contains("1 active, 1 completed"));
 }
 
-impl TodoApp {
-    fn new() -> Self {
-        Self {
-            view: TodoView::new(),
-            tick_count: 0,
+// ============================================================================
+// Effect with side effects demo
+// ============================================================================
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TodoEffectWithSave {
+    Unchanged,
+    None,
+    SaveRequired, // Signal that state should be persisted
+}
+
+impl Effect for TodoEffectWithSave {
+    fn is_unchanged(&self) -> bool {
+        matches!(self, TodoEffectWithSave::Unchanged)
+    }
+}
+
+struct TodoReducerWithSave;
+
+impl Reducer for TodoReducerWithSave {
+    type State = TodoState;
+    type Action = TodoAction;
+    type Effect = TodoEffectWithSave;
+
+    fn reduce(state: &mut Self::State, action: Self::Action) -> Self::Effect {
+        match action {
+            TodoAction::Add(text) => {
+                if text.is_empty() {
+                    return TodoEffectWithSave::Unchanged;
+                }
+                let todo = Todo {
+                    id: state.next_id,
+                    text,
+                    completed: false,
+                };
+                state.todos.push(todo).ok();
+                state.next_id += 1;
+                TodoEffectWithSave::SaveRequired // Persist new todos
+            }
+            TodoAction::Toggle(id) => {
+                if let Some(todo) = state.todos.iter_mut().find(|t| t.id == id) {
+                    todo.completed = !todo.completed;
+                    TodoEffectWithSave::SaveRequired // Persist toggle state
+                } else {
+                    TodoEffectWithSave::Unchanged
+                }
+            }
+            TodoAction::Delete(id) => {
+                let original_len = state.todos.len();
+                state.todos.retain(|t| t.id != id);
+                if state.todos.len() != original_len {
+                    TodoEffectWithSave::SaveRequired // Persist deletion
+                } else {
+                    TodoEffectWithSave::Unchanged
+                }
+            }
+            TodoAction::SetFilter(filter) => {
+                if filter == state.filter {
+                    TodoEffectWithSave::Unchanged
+                } else {
+                    state.filter = filter;
+                    TodoEffectWithSave::None // Filter is UI-only, no save needed
+                }
+            }
+            TodoAction::ClearCompleted => {
+                let original_len = state.todos.len();
+                state.todos.retain(|t| !t.completed);
+                if state.todos.len() != original_len {
+                    TodoEffectWithSave::SaveRequired
+                } else {
+                    TodoEffectWithSave::Unchanged
+                }
+            }
         }
     }
 }
 
-impl Application for TodoApp {
-    type State = TodoState;
-    type Action = TodoAction;
-    type Reducer = TodoReducer;
-    type View = TodoView;
-
-    fn view(&mut self) -> &mut Self::View {
-        &mut self.view
-    }
-
-    fn tick(&mut self) {
-        self.tick_count += 1;
-    }
-}
-
 #[test]
-fn todo_app_with_application_trait() {
-    let mut app = TodoApp::new();
-    let mut store: Store<TodoState, TodoAction, 16> = Store::new(TodoState::default());
+fn todo_app_tracks_save_effects() {
+    let mut app: App<TodoState, TodoAction, TodoReducerWithSave, TodoView> =
+        App::new(TodoView::new(), TodoState::default());
 
-    // Initial render
-    app.view().render(store.state());
-    assert!(app.view().text().contains("(no items)"));
+    let mut save_count = 0;
 
-    // Enqueue actions (simulating button presses / ISR events)
+    // Add a task - should require save
     let mut text = heapless::String::<32>::new();
-    text.push_str("Learn Rust").ok();
-    store.enqueue(TodoAction::Add(text)).ok();
+    text.push_str("Important task").ok();
+    let effect = app.dispatch(TodoAction::Add(text));
+    if matches!(effect, TodoEffectWithSave::SaveRequired) {
+        save_count += 1;
+    }
 
-    let mut text = heapless::String::<32>::new();
-    text.push_str("Build firmware").ok();
-    store.enqueue(TodoAction::Add(text)).ok();
+    // Toggle - should require save
+    let effect = app.dispatch(TodoAction::Toggle(0));
+    if matches!(effect, TodoEffectWithSave::SaveRequired) {
+        save_count += 1;
+    }
 
-    store.enqueue(TodoAction::Toggle(0)).ok();
+    // Change filter - should NOT require save
+    let effect = app.dispatch(TodoAction::SetFilter(Filter::Active));
+    if matches!(effect, TodoEffectWithSave::SaveRequired) {
+        save_count += 1;
+    }
 
-    // Run one iteration using the framework's process_iteration
-    let renders = process_iteration(&mut app, &mut store);
-
-    // Verify tick was called and correct number of renders
-    assert_eq!(app.tick_count, 1);
-    assert_eq!(renders, 3); // 3 actions, all changed state
-
-    // Verify final state via view
-    assert!(app.view().text().contains("[x] Learn Rust"));
-    assert!(app.view().text().contains("[ ] Build firmware"));
-    assert!(app.view().text().contains("1 active, 1 completed"));
-
-    // Run another iteration with no actions - tick still called, no render
-    let renders = process_iteration(&mut app, &mut store);
-    assert_eq!(app.tick_count, 2);
-    assert_eq!(renders, 0); // No actions queued
+    assert_eq!(save_count, 2); // Only Add and Toggle required save
 }

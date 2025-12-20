@@ -4,38 +4,64 @@
 //!
 //! ## Design Principles
 //!
-//! 1. **Pure reducers** - State transformation with no side effects
-//! 2. **Exhaustive matching** - Rust's type system enforces handling all action variants
-//! 3. **Framework-owned loop** - The `Application` trait provides a bullet-proof main loop
-//! 4. **Testable** - `TextView` enables testing views without hardware
+//! 1. **Mutable reducers** - In-place state mutation, no cloning
+//! 2. **Explicit effects** - Reducer returns side effects for the main loop to handle
+//! 3. **Exhaustive matching** - Rust's type system enforces handling all action variants
+//! 4. **Stack-based App** - Single buffer, no cloning, embassy/RTIC compatible
+//! 5. **Framework renders** - dispatch() handles rendering internally
 //!
 //! ## Example
 //!
 //! ```rust
-//! use reducto::{Outcome, Reducer, Store};
+//! use reducto::{Effect, Reducer, App, View, TextView};
+//! use core::fmt::Write;
 //!
-//! #[derive(Clone, PartialEq, Default)]
+//! #[derive(Default)]
 //! struct AppState { count: i32 }
 //!
 //! enum Action { Increment, Decrement }
+//!
+//! #[derive(Clone, Copy)]
+//! enum AppEffect { None, Unchanged }
+//!
+//! impl Effect for AppEffect {
+//!     fn is_unchanged(&self) -> bool {
+//!         matches!(self, AppEffect::Unchanged)
+//!     }
+//! }
 //!
 //! struct AppReducer;
 //!
 //! impl Reducer for AppReducer {
 //!     type State = AppState;
 //!     type Action = Action;
+//!     type Effect = AppEffect;
 //!
-//!     fn reduce(mut state: Self::State, action: Self::Action) -> Outcome<Self::State> {
+//!     fn reduce(state: &mut Self::State, action: Self::Action) -> Self::Effect {
 //!         match action {
-//!             Action::Increment => { state.count += 1; Outcome::changed(state) }
-//!             Action::Decrement => { state.count -= 1; Outcome::changed(state) }
+//!             Action::Increment => { state.count += 1; AppEffect::None }
+//!             Action::Decrement => { state.count -= 1; AppEffect::None }
 //!         }
 //!     }
 //! }
 //!
-//! let mut store: Store<AppState, Action> = Store::new(AppState::default());
-//! store.dispatch::<AppReducer>(Action::Increment);
-//! assert_eq!(store.state().count, 1);
+//! struct AppView { buffer: TextView<64> }
+//!
+//! impl View for AppView {
+//!     type State = AppState;
+//!     fn render(&mut self, state: &Self::State) {
+//!         self.buffer.clear();
+//!         write!(self.buffer.buffer_mut(), "Count: {}", state.count).ok();
+//!     }
+//!     fn text(&self) -> &str { self.buffer.as_str() }
+//! }
+//!
+//! let mut app = App::<AppState, Action, AppReducer, AppView>::new(
+//!     AppView { buffer: TextView::new() },
+//!     AppState::default(),
+//! );
+//! app.dispatch(Action::Increment);
+//! assert_eq!(app.state().count, 1);
 //! ```
 
 #![no_std]
@@ -43,106 +69,83 @@
 use core::marker::PhantomData;
 use heapless::String;
 
-/// Result of a reducer - indicates whether state changed.
+/// Trait for reducer return types that indicate side effects.
 ///
-/// Most actions change state, so `Changed` is the common case.
-/// Use `Unchanged` to short-circuit when an action is a no-op.
+/// Implement this trait on your effect enum to tell the framework
+/// whether to skip rendering (when `is_unchanged()` returns true).
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// fn reduce(state: State, action: Action) -> Outcome<State> {
-///     match action {
-///         Action::Increment => Outcome::changed(State { count: state.count + 1 }),
-///         Action::SetValue(v) if v == state.value => Outcome::unchanged(state),
-///         Action::SetValue(v) => Outcome::changed(State { value: v, ..state }),
+/// ```rust
+/// use reducto::Effect;
+///
+/// #[derive(Clone, Copy)]
+/// enum AppEffect {
+///     Unchanged,          // Skip render
+///     None,               // Render only (common case)
+///     Save,               // Render + save to storage
+///     StartAnimation,     // Render + start animation
+/// }
+///
+/// impl Effect for AppEffect {
+///     fn is_unchanged(&self) -> bool {
+///         matches!(self, AppEffect::Unchanged)
 ///     }
 /// }
 /// ```
-#[derive(Debug)]
-pub enum Outcome<S> {
-    /// State was modified - triggers on_state_change callback
-    Changed(S),
-    /// State was not modified - callback is skipped
-    Unchanged(S),
+pub trait Effect {
+    /// Returns true if state was not modified (skip rendering).
+    fn is_unchanged(&self) -> bool;
 }
 
-impl<S> Outcome<S> {
-    /// Create a Changed outcome (most common case)
-    pub fn changed(state: S) -> Self {
-        Outcome::Changed(state)
-    }
-
-    /// Extract the state and whether it changed
-    pub fn into_parts(self) -> (S, bool) {
-        match self {
-            Outcome::Changed(s) => (s, true),
-            Outcome::Unchanged(s) => (s, false),
-        }
-    }
-}
-
-/// Mark state as changed. Use in reducer if/else branches:
-/// ```rust,ignore
-/// if condition { changed(new_state) } else { unchanged(state) }
-/// ```
-pub fn changed<S>(state: S) -> Outcome<S> {
-    Outcome::Changed(state)
-}
-
-/// Mark state as unchanged. Use in reducer if/else branches:
-/// ```rust,ignore
-/// if condition { unchanged(state) } else { changed(new_state) }
-/// ```
-pub fn unchanged<S>(state: S) -> Outcome<S> {
-    Outcome::Unchanged(state)
-}
-
-
-/// Trait for automatic conversion to Outcome.
-///
-/// This enables the reducer macro to accept either:
-/// - A bare state value (auto-wrapped as `Outcome::Changed`)
-/// - An explicit `Outcome` (passed through)
-pub trait IntoOutcome<S> {
-    fn into_outcome(self) -> Outcome<S>;
-}
-
-// Bare state -> Changed
-impl<S> IntoOutcome<S> for S {
-    fn into_outcome(self) -> Outcome<S> {
-        Outcome::Changed(self)
-    }
-}
-
-// Outcome<S> -> pass through unchanged
-impl<S> IntoOutcome<S> for Outcome<S> {
-    fn into_outcome(self) -> Outcome<S> {
-        self
-    }
-}
-
-/// Pure state transformation: (State, Action) -> Outcome<State>
+/// Mutable state transformation: (&mut State, Action) -> Effect
 ///
 /// Implement this trait to define how actions transform state.
 /// Rust's exhaustive `match` on the Action enum ensures all variants are handled.
 ///
-/// Return `Outcome::changed(new_state)` when state is modified, or
-/// `Outcome::unchanged(state)` to short-circuit no-op actions.
+/// Unlike traditional Redux, state is mutated in-place for zero-copy performance.
+/// The reducer returns an Effect that describes any side effects the main loop
+/// should perform.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// impl Reducer for AppReducer {
+///     type State = AppState;
+///     type Action = Action;
+///     type Effect = AppEffect;
+///
+///     fn reduce(state: &mut Self::State, action: Self::Action) -> Self::Effect {
+///         match action {
+///             Action::Tick1s => {
+///                 state.uptime_seconds += 1;
+///                 AppEffect::None
+///             }
+///             Action::BrightnessUp => {
+///                 state.brightness = (state.brightness + 1).min(10);
+///                 AppEffect::Save  // Signal main loop to save
+///             }
+///             Action::ButtonNext if state.at_end() => {
+///                 AppEffect::Unchanged  // No-op, skip render
+///             }
+///         }
+///     }
+/// }
+/// ```
 pub trait Reducer {
     /// The state type this reducer operates on
     type State;
     /// The action type this reducer handles
     type Action;
+    /// The effect type returned by reduce (user-defined enum)
+    type Effect: Effect;
 
     /// Transform state based on an action.
     ///
-    /// This must be a pure function - no side effects allowed.
-    /// The same inputs must always produce the same output.
-    ///
-    /// Return `Outcome::changed()` for most actions, `Outcome::unchanged()`
-    /// to skip the on_state_change callback.
-    fn reduce(state: Self::State, action: Self::Action) -> Outcome<Self::State>;
+    /// Mutate state in-place and return an Effect describing any
+    /// side effects. Return an effect where `is_unchanged()` is true
+    /// to skip rendering.
+    fn reduce(state: &mut Self::State, action: Self::Action) -> Self::Effect;
 }
 
 /// Store holds application state and an action queue.
@@ -151,13 +154,12 @@ pub trait Reducer {
 /// - Holding the current state
 /// - Queueing actions (typically from ISRs)
 /// - Dispatching queued actions through the reducer
-/// - Reporting whether state changed
+/// - Returning effects for side effect handling
 ///
 /// # Queue Design
 ///
 /// ISRs and other event sources call `enqueue()` to add actions.
-/// The main loop calls `process_queue_with_callback()` to drain all
-/// queued actions and handle state changes.
+/// The main loop calls `process_queue()` to drain all queued actions.
 ///
 /// # Example
 ///
@@ -166,9 +168,13 @@ pub trait Reducer {
 /// store.enqueue(Action::ButtonPressed).ok();
 ///
 /// // In main loop:
-/// store.process_queue_with_callback::<MyReducer, _>(|old, new| {
-///     display.render(new);
-/// });
+/// while let Some(action) = store.pop_action() {
+///     let effect = store.dispatch::<MyReducer>(action);
+///     match effect {
+///         Effect::Save => save_state(store.state()),
+///         _ => {}
+///     }
+/// }
 /// ```
 pub struct Store<S, A, const N: usize = 8> {
     state: S,
@@ -187,6 +193,11 @@ impl<S, A, const N: usize> Store<S, A, N> {
     /// Get a reference to the current state.
     pub fn state(&self) -> &S {
         &self.state
+    }
+
+    /// Get a mutable reference to the current state.
+    pub fn state_mut(&mut self) -> &mut S {
+        &mut self.state
     }
 
     /// Enqueue an action for later processing.
@@ -214,70 +225,12 @@ impl<S, A, const N: usize> Store<S, A, N> {
 
     /// Dispatch a single action through the reducer immediately.
     ///
-    /// Returns `true` if the reducer returned `Outcome::changed()`.
-    /// Prefer `process_queue_with_callback()` for normal operation.
-    ///
-    /// Note: State is moved to reducer (zero-copy). Rust's ownership
-    /// system guarantees immutability - no cloning needed.
-    pub fn dispatch<R>(&mut self, action: A) -> bool
+    /// Returns the Effect from the reducer. State is mutated in-place.
+    pub fn dispatch<R>(&mut self, action: A) -> R::Effect
     where
         R: Reducer<State = S, Action = A>,
-        S: Default,
     {
-        let (new_state, changed) = R::reduce(core::mem::take(&mut self.state), action).into_parts();
-        self.state = new_state;
-        changed
-    }
-
-    /// Process all queued actions, returning the number of state changes.
-    ///
-    /// This drains the queue and dispatches each action through the reducer.
-    /// Use `process_queue_with_callback()` if you need to react to each change.
-    pub fn process_queue<R>(&mut self) -> usize
-    where
-        R: Reducer<State = S, Action = A>,
-        S: Default,
-    {
-        let mut changes = 0;
-        while let Some(action) = self.queue.pop_front() {
-            let (new_state, changed) = R::reduce(core::mem::take(&mut self.state), action).into_parts();
-            self.state = new_state;
-            if changed {
-                changes += 1;
-            }
-        }
-        changes
-    }
-
-    /// Process all queued actions, calling `on_change` for each state change.
-    ///
-    /// This is the primary method for the main loop. It drains the queue,
-    /// dispatches each action, and calls the callback when reducer returns
-    /// `Outcome::changed()`.
-    ///
-    /// Zero-copy: state is moved to reducer, not cloned. Rust's ownership
-    /// guarantees no external mutation.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// store.process_queue_with_callback::<MyReducer, _>(|new| {
-    ///     display.render(new);
-    /// });
-    /// ```
-    pub fn process_queue_with_callback<R, F>(&mut self, mut on_change: F)
-    where
-        R: Reducer<State = S, Action = A>,
-        S: Default,
-        F: FnMut(&S),
-    {
-        while let Some(action) = self.queue.pop_front() {
-            let (new_state, changed) = R::reduce(core::mem::take(&mut self.state), action).into_parts();
-            self.state = new_state;
-            if changed {
-                on_change(&self.state);
-            }
-        }
+        R::reduce(&mut self.state, action)
     }
 }
 
@@ -389,105 +342,39 @@ impl<const N: usize> Default for TextView<N> {
     }
 }
 
-/// Application trait for framework-owned main loop.
+/// An application that owns its state and view.
 ///
-/// Implement this trait to define your application's behavior. The framework
-/// provides the main loop structure, ensuring correct ordering:
-/// 1. `tick()` is called every iteration
-/// 2. All queued actions are processed through the reducer
-/// 3. For each state change, `view().render(state)` is called automatically
+/// App provides the recommended way to structure an embedded application.
+/// It owns the state and view, providing a clean `dispatch()` API that
+/// automatically renders when state changes.
 ///
-/// Actions are queued via `Store::enqueue()` from ISRs or event handlers.
-/// The framework drains the queue automatically.
+/// State is mutated in-place for zero-copy performance.
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// struct MyApp {
-///     view: AppView,
-/// }
-///
-/// impl Application for MyApp {
-///     type State = AppState;
-///     type Action = Action;
-///     type Reducer = AppReducer;
-///     type View = AppView;
-///
-///     fn view(&mut self) -> &mut Self::View {
-///         &mut self.view
-///     }
-/// }
-///
-/// // In button ISR:
-/// store.enqueue(Action::ButtonPressed).ok();
-/// ```
-pub trait Application {
-    /// The state type for this application
-    type State: Default;
-    /// The action type for this application
-    type Action;
-    /// The reducer that handles state transitions
-    type Reducer: Reducer<State = Self::State, Action = Self::Action>;
-    /// The root view that renders state
-    type View: View<State = Self::State>;
-
-    /// Return the root view for rendering.
-    ///
-    /// The framework calls `view().render(state)` when state changes.
-    fn view(&mut self) -> &mut Self::View;
-
-    /// Called every loop iteration regardless of state changes.
-    ///
-    /// Override this for periodic tasks like animation updates
-    /// or watchdog feeds. Default implementation does nothing.
-    fn tick(&mut self) {}
-}
-
-/// Result of a dispatch operation with access to old and new state.
-///
-/// This enables side effects that need to detect state transitions
-/// by comparing old and new state.
-pub struct Dispatch<'a, S> {
-    /// State before the action was dispatched
-    pub old: &'a S,
-    /// State after the action was dispatched
-    pub new: &'a S,
-    /// Whether the reducer reported a state change
-    pub changed: bool,
-}
-
-/// An application that owns its store and view.
-///
-/// This is the recommended way to structure an application. The `App` owns
-/// the state store and view, providing a clean `dispatch()` API.
-///
-/// Uses double-buffering for state, allowing side effects to compare
-/// old and new state without cloning.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// let mut app = App::<AppState, Action, AppReducer, _>::new(view, AppState::new());
-/// app.dispatch(Action::Boot);
+/// let mut app = App::<AppState, Action, AppReducer, AppView>::new(
+///     AppView::new(),
+///     AppState::default(),
+/// );
 ///
 /// loop {
-///     let action = channel.receive().await;
-///     let result = app.dispatch(action);
-///     if result.changed {
-///         // Can compare result.old and result.new for side effects
+///     let action = get_action();
+///     let effect = app.dispatch(action);  // Renders internally if changed
+///
+///     match effect {
+///         Effect::Save => storage::save(app.state()),
+///         Effect::StartAnimation => led::start_animation(),
+///         _ => {}
 ///     }
 /// }
 /// ```
 pub struct App<S, A, R, V>
 where
-    S: Default + Clone,
     R: Reducer<State = S, Action = A>,
     V: View<State = S>,
 {
-    /// Double-buffered state: [0] = current, [1] = previous
-    states: [S; 2],
-    /// Index of current state (0 or 1)
-    current: usize,
+    state: S,
     view: V,
     _reducer: PhantomData<R>,
     _action: PhantomData<A>,
@@ -495,56 +382,36 @@ where
 
 impl<S, A, R, V> App<S, A, R, V>
 where
-    S: Default + Clone,
     R: Reducer<State = S, Action = A>,
     V: View<State = S>,
 {
     /// Create a new application with the given view and initial state.
     pub fn new(view: V, initial_state: S) -> Self {
         Self {
-            states: [initial_state, S::default()],
-            current: 0,
+            state: initial_state,
             view,
             _reducer: PhantomData,
             _action: PhantomData,
         }
     }
 
-    /// Dispatch an action through the reducer, rendering if state changed.
+    /// Dispatch an action through the reducer.
     ///
-    /// Returns a `Dispatch` struct with references to old and new state,
-    /// enabling side effects that need to detect state transitions.
+    /// The view is automatically rendered if the effect indicates state changed
+    /// (i.e., `effect.is_unchanged()` returns false).
     ///
-    /// The view is automatically rendered if state changed.
-    pub fn dispatch(&mut self, action: A) -> Dispatch<'_, S> {
-        let old_idx = self.current;
-        let new_idx = 1 - old_idx;
-
-        // Clone current state to new buffer, keep original for comparison
-        self.states[new_idx] = self.states[old_idx].clone();
-
-        // Take from new buffer for reducer (old buffer preserved)
-        let state_for_reducer = core::mem::take(&mut self.states[new_idx]);
-        let (new_state, changed) = R::reduce(state_for_reducer, action).into_parts();
-        self.states[new_idx] = new_state;
-
-        // Swap current pointer
-        self.current = new_idx;
-
-        if changed {
-            self.view.render(&self.states[new_idx]);
+    /// Returns the Effect from the reducer for side effect handling.
+    pub fn dispatch(&mut self, action: A) -> R::Effect {
+        let effect = R::reduce(&mut self.state, action);
+        if !effect.is_unchanged() {
+            self.view.render(&self.state);
         }
-
-        Dispatch {
-            old: &self.states[old_idx],
-            new: &self.states[new_idx],
-            changed,
-        }
+        effect
     }
 
     /// Get a reference to the current state.
     pub fn state(&self) -> &S {
-        &self.states[self.current]
+        &self.state
     }
 
     /// Get a mutable reference to the view.
@@ -563,36 +430,37 @@ where
 ///
 /// ```rust,ignore
 /// reducto::reducer! {
-///     ReducerName for State, Action {
-///         Action::Variant1 => |state| new_state_expr,
-///         Action::Variant2(val) => |state| new_state_expr_using_val,
+///     ReducerName for State, Action, Effect {
+///         Action::Variant1 => |state| { state.field += 1; Effect::None },
+///         Action::Variant2(val) => |state| { state.field = val; Effect::Save },
 ///     }
 /// }
 /// ```
 ///
-/// Each arm's body is automatically wrapped in `Outcome::changed()`.
-/// For no-op short-circuits, return `Outcome::unchanged(state)` explicitly.
+/// Each arm receives `&mut state` and must return an Effect.
 ///
 /// # Example
 ///
 /// ```rust
-/// use reducto::{Outcome, Reducer, Store};
+/// use reducto::{Effect, Reducer, Store};
 ///
-/// #[derive(Clone, PartialEq, Default)]
+/// #[derive(Default)]
 /// struct Counter { count: i32 }
 ///
-/// #[derive(Clone)]
-/// enum CounterAction {
-///     Increment,
-///     Decrement,
-///     Set(i32),
+/// enum CounterAction { Increment, Decrement, Set(i32) }
+///
+/// #[derive(Clone, Copy)]
+/// enum CounterEffect { None, Unchanged }
+///
+/// impl Effect for CounterEffect {
+///     fn is_unchanged(&self) -> bool { matches!(self, CounterEffect::Unchanged) }
 /// }
 ///
 /// reducto::reducer! {
-///     CounterReducer for Counter, CounterAction {
-///         CounterAction::Increment => |state| Counter { count: state.count + 1 },
-///         CounterAction::Decrement => |state| Counter { count: state.count - 1 },
-///         CounterAction::Set(n) => |_state| Counter { count: n },
+///     CounterReducer for Counter, CounterAction, CounterEffect {
+///         CounterAction::Increment => |state| { state.count += 1; CounterEffect::None },
+///         CounterAction::Decrement => |state| { state.count -= 1; CounterEffect::None },
+///         CounterAction::Set(n) => |state| { state.count = n; CounterEffect::None },
 ///     }
 /// }
 ///
@@ -603,7 +471,7 @@ where
 #[macro_export]
 macro_rules! reducer {
     (
-        $reducer_name:ident for $state_type:ty, $action_type:ty {
+        $reducer_name:ident for $state_type:ty, $action_type:ty, $effect_type:ty {
             $( $pattern:pat => |$var:ident| $body:expr ),* $(,)?
         }
     ) => {
@@ -612,14 +480,15 @@ macro_rules! reducer {
         impl $crate::Reducer for $reducer_name {
             type State = $state_type;
             type Action = $action_type;
+            type Effect = $effect_type;
 
             #[allow(unused_variables, unused_mut)]
-            fn reduce(state: Self::State, action: Self::Action) -> $crate::Outcome<Self::State> {
+            fn reduce(state: &mut Self::State, action: Self::Action) -> Self::Effect {
                 match action {
                     $(
                         $pattern => {
-                            let mut $var = state;
-                            $crate::IntoOutcome::into_outcome($body)
+                            let $var = state;
+                            $body
                         }
                     ),*
                 }
@@ -628,43 +497,3 @@ macro_rules! reducer {
     };
 }
 
-/// Process one iteration of the application loop.
-///
-/// This is the core logic used by `run_loop`. Call this in tests to
-/// simulate loop iterations without blocking forever.
-///
-/// Each call:
-/// 1. Calls `app.tick()`
-/// 2. Drains all queued actions through the reducer
-/// 3. Calls `view().render()` for each state change
-///
-/// Returns the number of renders (state changes) that occurred.
-pub fn process_iteration<A: Application, const Q: usize>(
-    app: &mut A,
-    store: &mut Store<A::State, A::Action, Q>,
-) -> usize {
-    app.tick();
-    let mut renders = 0;
-    while let Some(action) = store.pop_action() {
-        if store.dispatch::<A::Reducer>(action) {
-            app.view().render(store.state());
-            renders += 1;
-        }
-    }
-    renders
-}
-
-/// Run the application main loop.
-///
-/// This function never returns (indicated by `-> !`). It calls
-/// `process_iteration` in an infinite loop.
-///
-/// For testing, use `process_iteration` directly instead.
-pub fn run_loop<A: Application, const Q: usize>(
-    app: &mut A,
-    store: &mut Store<A::State, A::Action, Q>,
-) -> ! {
-    loop {
-        process_iteration(app, store);
-    }
-}

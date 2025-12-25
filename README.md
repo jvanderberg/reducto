@@ -13,7 +13,7 @@ A `no_std` Redux-like state management framework for embedded systems.
 ## Quick Start
 
 ```rust
-use reducto::{App, Effect, View, TextView};
+use reducto::{App, Effect, Reducer, View, TextView};
 use core::fmt::Write;
 
 // Define your state
@@ -34,11 +34,20 @@ impl Effect for AppEffect {
     fn changed() -> Self { AppEffect::None }
 }
 
-// Define your reducer using the macro
-reducto::reducer! {
-    AppReducer for AppState, Action, AppEffect {
-        Action::Increment => |state| state.count += 1,
-        Action::Decrement => |state| state.count -= 1,
+// Define your reducer
+struct AppReducer;
+
+impl Reducer for AppReducer {
+    type State = AppState;
+    type Action = Action;
+    type Effect = AppEffect;
+
+    fn reduce(state: &mut Self::State, action: Self::Action) -> Self::Effect {
+        match action {
+            Action::Increment => state.count += 1,
+            Action::Decrement => state.count -= 1,
+        }
+        AppEffect::None
     }
 }
 
@@ -54,7 +63,7 @@ impl View for AppView {
 }
 
 // Create and use your app
-let mut app: App<AppState, Action, AppReducer, AppView> = App::new(
+let mut app: App<AppReducer, AppView> = App::new(
     AppView { buffer: TextView::new() },
     AppState::default(),
 );
@@ -84,34 +93,34 @@ impl Effect for AppEffect {
 }
 ```
 
-## Reducer Macro
+## Reducer Implementation
 
-The `reducer!` macro provides implicit effect returns:
-
-- If the body returns `()`, it becomes `Effect::changed()`
-- If the body returns an explicit `Effect`, it passes through
+Reducers mutate state and return an effect. Rust's exhaustive match ensures all actions are handled:
 
 ```rust
-reducto::reducer! {
-    pub AppReducer for AppState, Action, AppEffect {
-        // Implicit: returns () which becomes changed()
-        Action::Increment => |state| state.count += 1,
+impl Reducer for AppReducer {
+    type State = AppState;
+    type Action = Action;
+    type Effect = AppEffect;
 
-        // Explicit: returns specific effect
-        Action::Save => |state| {
-            state.dirty = false;
-            AppEffect::Save
-        },
-
-        // Conditional logic
-        Action::SetValue(v) => |state| {
-            if v == state.value {
-                AppEffect::Unchanged
-            } else {
-                state.value = v;
-                AppEffect::Save
+    fn reduce(state: &mut Self::State, action: Self::Action) -> Self::Effect {
+        match action {
+            Action::Increment => {
+                state.count += 1;
+                AppEffect::None
             }
-        },
+            Action::SetValue(v) if v == state.value => {
+                AppEffect::Unchanged  // No change, skip render
+            }
+            Action::SetValue(v) => {
+                state.value = v;
+                AppEffect::Save  // Persist this change
+            }
+            Action::Reset => {
+                *state = AppState::default();
+                AppEffect::None
+            }
+        }
     }
 }
 ```
@@ -168,6 +177,39 @@ loop {
 **When to use direct dispatch:**
 - Async runtimes (embassy) already have channels that act as queues
 - Single-threaded code where actions come from polling
+
+## View Composition (Optional)
+
+The `reducto-view` crate provides a macro for declarative view composition:
+
+```rust
+use reducto_view::view;
+
+view! {
+    AppView<D: Write> for AppState {
+        <Header />
+        @if state.loading { <Spinner /> } @else { <Content /> }
+        @match state.screen {
+            Screen::Home => <HomeScreen />,
+            Screen::Settings => <SettingsScreen />,
+        }
+        <Footer />
+    }
+}
+```
+
+Components are structs with a `render` method:
+
+```rust
+struct Header;
+impl Header {
+    fn render<D: Write>(display: &mut D, state: &AppState) {
+        writeln!(display, "=== {} ===", state.title).ok();
+    }
+}
+```
+
+See `reducto-view` crate for details.
 
 ## License
 

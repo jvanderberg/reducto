@@ -56,7 +56,7 @@
 //!     }
 //! }
 //!
-//! let mut app = App::<AppState, Action, AppReducer, AppView>::new(
+//! let mut app = App::<AppReducer, AppView>::new(
 //!     AppView { buffer: TextView::new() },
 //!     AppState::default(),
 //! );
@@ -102,34 +102,9 @@ pub trait Effect {
 
     /// Returns the default "state changed" effect.
     ///
-    /// This is used by the `reducer!` macro to allow implicit returns
-    /// when the reducer body doesn't explicitly return an effect.
+    /// Typically returns the variant that means "state changed, render needed"
+    /// with no additional side effects.
     fn changed() -> Self;
-}
-
-/// Converts a value into an Effect.
-///
-/// This trait enables ergonomic reducer definitions where:
-/// - `()` (unit) automatically becomes `Effect::changed()`
-/// - An explicit `Effect` value passes through unchanged
-///
-/// Used by the `reducer!` macro to allow implicit effect returns.
-pub trait IntoEffect<E: Effect> {
-    fn into_effect(self) -> E;
-}
-
-/// Unit type converts to the default "changed" effect.
-impl<E: Effect> IntoEffect<E> for () {
-    fn into_effect(self) -> E {
-        E::changed()
-    }
-}
-
-/// Effects pass through unchanged.
-impl<E: Effect> IntoEffect<E> for E {
-    fn into_effect(self) -> E {
-        self
-    }
 }
 
 /// Mutable state transformation: (&mut State, Action) -> Effect
@@ -319,24 +294,24 @@ impl<const N: usize> Default for TextView<N> {
 ///
 /// The queue pattern keeps ISRs fast by deferring the actual dispatch+render
 /// to the main loop.
-pub struct App<S, A, R, V, const Q: usize = 8>
+pub struct App<R, V, const Q: usize = 8>
 where
-    R: Reducer<State = S, Action = A>,
-    V: View<State = S>,
+    R: Reducer,
+    V: View<State = R::State>,
 {
-    state: S,
+    state: R::State,
     view: V,
-    queue: heapless::Deque<A, Q>,
+    queue: heapless::Deque<R::Action, Q>,
     _reducer: PhantomData<R>,
 }
 
-impl<S, A, R, V, const Q: usize> App<S, A, R, V, Q>
+impl<R, V, const Q: usize> App<R, V, Q>
 where
-    R: Reducer<State = S, Action = A>,
-    V: View<State = S>,
+    R: Reducer,
+    V: View<State = R::State>,
 {
     /// Create a new application with the given view and initial state.
-    pub fn new(view: V, initial_state: S) -> Self {
+    pub fn new(view: V, initial_state: R::State) -> Self {
         Self {
             state: initial_state,
             view,
@@ -353,7 +328,7 @@ where
     /// Returns the Effect from the reducer for side effect handling.
     ///
     /// Use this when actions come from an async channel (embassy pattern).
-    pub fn dispatch(&mut self, action: A) -> R::Effect {
+    pub fn dispatch(&mut self, action: R::Action) -> R::Effect {
         let effect = R::reduce(&mut self.state, action);
         if !effect.is_unchanged() {
             self.view.render(&self.state);
@@ -370,7 +345,7 @@ where
     /// Returns `Err(action)` if the queue is full.
     ///
     /// Note: For ISR safety, wrap the App in `critical_section::Mutex<RefCell<App>>`.
-    pub fn enqueue(&mut self, action: A) -> Result<(), A> {
+    pub fn enqueue(&mut self, action: R::Action) -> Result<(), R::Action> {
         self.queue.push_back(action)
     }
 
@@ -411,7 +386,7 @@ where
     }
 
     /// Get a reference to the current state.
-    pub fn state(&self) -> &S {
+    pub fn state(&self) -> &R::State {
         &self.state
     }
 
@@ -419,98 +394,5 @@ where
     pub fn view(&mut self) -> &mut V {
         &mut self.view
     }
-}
-
-/// Generate a Reducer implementation from a pattern-matching DSL.
-///
-/// This macro provides a concise way to define reducers while ensuring
-/// that all action variants are handled (Rust's exhaustive match checking
-/// applies to the generated code).
-///
-/// # Implicit Effect Returns
-///
-/// The macro uses `IntoEffect` to allow implicit returns:
-/// - If the body returns `()`, it becomes `Effect::changed()` (state changed, render)
-/// - If the body returns an explicit `Effect`, it passes through
-///
-/// # Syntax
-///
-/// ```rust,ignore
-/// reducto::reducer! {
-///     ReducerName for State, Action, Effect {
-///         // Implicit: returns () which becomes Effect::changed()
-///         Action::Increment => |state| state.field += 1,
-///
-///         // Explicit: returns specific effect
-///         Action::Save => |state| { state.dirty = false; Effect::Save },
-///         Action::NoOp => |state| Effect::Unchanged,
-///     }
-/// }
-/// ```
-///
-/// # Example
-///
-/// ```rust
-/// use reducto::{Effect, Reducer, App, View, TextView};
-///
-/// #[derive(Default)]
-/// struct Counter { count: i32 }
-///
-/// enum CounterAction { Increment, Decrement, Set(i32) }
-///
-/// #[derive(Clone, Copy)]
-/// enum CounterEffect { None, Unchanged }
-///
-/// impl Effect for CounterEffect {
-///     fn is_unchanged(&self) -> bool { matches!(self, CounterEffect::Unchanged) }
-///     fn changed() -> Self { CounterEffect::None }
-/// }
-///
-/// reducto::reducer! {
-///     CounterReducer for Counter, CounterAction, CounterEffect {
-///         CounterAction::Increment => |state| state.count += 1,
-///         CounterAction::Decrement => |state| state.count -= 1,
-///         CounterAction::Set(n) => |state| state.count = n,
-///     }
-/// }
-///
-/// struct CounterView;
-/// impl View for CounterView {
-///     type State = Counter;
-///     fn render(&mut self, _: &Counter) {}
-/// }
-///
-/// let mut app: App<Counter, CounterAction, CounterReducer, CounterView> =
-///     App::new(CounterView, Counter::default());
-/// app.dispatch(CounterAction::Increment);
-/// assert_eq!(app.state().count, 1);
-/// ```
-#[macro_export]
-macro_rules! reducer {
-    (
-        $vis:vis $reducer_name:ident for $state_type:ty, $action_type:ty, $effect_type:ty {
-            $( $pattern:pat => |$var:ident| $body:expr ),* $(,)?
-        }
-    ) => {
-        $vis struct $reducer_name;
-
-        impl $crate::Reducer for $reducer_name {
-            type State = $state_type;
-            type Action = $action_type;
-            type Effect = $effect_type;
-
-            #[allow(unused_variables, unused_mut)]
-            fn reduce(state: &mut Self::State, action: Self::Action) -> Self::Effect {
-                match action {
-                    $(
-                        $pattern => {
-                            let $var = state;
-                            $crate::IntoEffect::into_effect($body)
-                        }
-                    ),*
-                }
-            }
-        }
-    };
 }
 

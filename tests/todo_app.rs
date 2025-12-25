@@ -1,9 +1,11 @@
 //! Todo App - integration test for reducto framework
 //!
-//! Demonstrates: State, Actions, Reducer, TextView rendering, Effect-based side effects
+//! Demonstrates: State, Actions, Reducer, TextView rendering, Effect-based side effects,
+//! and view composition with the view! macro.
 
 use core::fmt::Write;
 use reducto::{App, Effect, Reducer, TextView, View};
+use reducto_view::view;
 
 // ============================================================================
 // Effect type for Todo app
@@ -186,7 +188,7 @@ impl View for TodoView {
 
 #[test]
 fn todo_app_full_workflow() {
-    let mut app: App<TodoState, TodoAction, TodoReducer, TodoView> =
+    let mut app: App<TodoReducer, TodoView> =
         App::new(TodoView::new(), TodoState::default());
 
     // Initial state - add an empty task (no-op) to check initial behavior
@@ -265,7 +267,7 @@ fn todo_app_full_workflow() {
 
 #[test]
 fn todo_app_with_queue() {
-    let mut app: App<TodoState, TodoAction, TodoReducer, TodoView> =
+    let mut app: App<TodoReducer, TodoView> =
         App::new(TodoView::new(), TodoState::default());
 
     // Simulate ISR-style: enqueue multiple actions
@@ -292,7 +294,7 @@ fn todo_app_with_queue() {
 
 #[test]
 fn todo_app_with_app() {
-    let mut app: App<TodoState, TodoAction, TodoReducer, TodoView> =
+    let mut app: App<TodoReducer, TodoView> =
         App::new(TodoView::new(), TodoState::default());
 
     // Add tasks - App handles rendering internally
@@ -395,7 +397,7 @@ impl Reducer for TodoReducerWithSave {
 
 #[test]
 fn todo_app_tracks_save_effects() {
-    let mut app: App<TodoState, TodoAction, TodoReducerWithSave, TodoView> =
+    let mut app: App<TodoReducerWithSave, TodoView> =
         App::new(TodoView::new(), TodoState::default());
 
     let mut save_count = 0;
@@ -421,4 +423,147 @@ fn todo_app_tracks_save_effects() {
     }
 
     assert_eq!(save_count, 2); // Only Add and Toggle required save
+}
+
+// ============================================================================
+// View composition with view! macro
+// ============================================================================
+
+// Sub-view components - each has fn render<D: Write>(display: &mut D, state: &State)
+
+struct Header;
+impl Header {
+    fn render<D: Write>(display: &mut D, _state: &TodoState) {
+        writeln!(display, "=== TODO APP ===").ok();
+    }
+}
+
+struct FilterStatus;
+impl FilterStatus {
+    fn render<D: Write>(display: &mut D, state: &TodoState) {
+        writeln!(display, "Filter: {:?}", state.filter).ok();
+        writeln!(display, "----------------").ok();
+    }
+}
+
+struct EmptyMessage;
+impl EmptyMessage {
+    fn render<D: Write>(display: &mut D, _state: &TodoState) {
+        writeln!(display, "(no items)").ok();
+    }
+}
+
+struct TodoList;
+impl TodoList {
+    fn render<D: Write>(display: &mut D, state: &TodoState) {
+        let filtered: heapless::Vec<&Todo, 8> = state
+            .todos
+            .iter()
+            .filter(|t| match state.filter {
+                Filter::All => true,
+                Filter::Active => !t.completed,
+                Filter::Completed => t.completed,
+            })
+            .collect();
+
+        for todo in &filtered {
+            let mark = if todo.completed { "x" } else { " " };
+            writeln!(display, "[{}] {} (id:{})", mark, todo.text, todo.id).ok();
+        }
+    }
+}
+
+struct Footer;
+impl Footer {
+    fn render<D: Write>(display: &mut D, state: &TodoState) {
+        let active_count = state.todos.iter().filter(|t| !t.completed).count();
+        let completed_count = state.todos.iter().filter(|t| t.completed).count();
+        writeln!(display, "----------------").ok();
+        writeln!(display, "{} active, {} completed", active_count, completed_count).ok();
+    }
+}
+
+// Composed view using the view! macro
+view! {
+    TodoBody<D: Write> for TodoState {
+        <Header />
+        <FilterStatus />
+        @if state.todos.iter().filter(|t| match state.filter {
+            Filter::All => true,
+            Filter::Active => !t.completed,
+            Filter::Completed => t.completed,
+        }).count() == 0 {
+            <EmptyMessage />
+        } @else {
+            <TodoList />
+        }
+        <Footer />
+    }
+}
+
+// Root view that wraps the composed view with setup/teardown
+struct ComposedTodoView {
+    inner: TodoBody<heapless::String<512>>,
+}
+
+impl ComposedTodoView {
+    fn new() -> Self {
+        Self {
+            inner: TodoBody::new(heapless::String::new()),
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        self.inner.display().as_str()
+    }
+}
+
+impl View for ComposedTodoView {
+    type State = TodoState;
+
+    fn render(&mut self, state: &Self::State) {
+        // Setup: clear the display
+        self.inner.display_mut().clear();
+        // Render composed view
+        self.inner.render(state);
+        // Teardown would go here (e.g., flush)
+    }
+}
+
+#[test]
+fn todo_app_with_composed_view() {
+    let mut app: App<TodoReducer, ComposedTodoView> =
+        App::new(ComposedTodoView::new(), TodoState::default());
+
+    // Add some todos
+    let mut text = heapless::String::<32>::new();
+    text.push_str("Buy milk").ok();
+    app.dispatch(TodoAction::Add(text));
+
+    let mut text = heapless::String::<32>::new();
+    text.push_str("Write code").ok();
+    app.dispatch(TodoAction::Add(text));
+
+    // Verify rendered output
+    assert!(app.view().as_str().contains("=== TODO APP ==="));
+    assert!(app.view().as_str().contains("[ ] Buy milk"));
+    assert!(app.view().as_str().contains("[ ] Write code"));
+    assert!(app.view().as_str().contains("2 active, 0 completed"));
+
+    // Toggle one
+    app.dispatch(TodoAction::Toggle(0));
+    assert!(app.view().as_str().contains("[x] Buy milk"));
+    assert!(app.view().as_str().contains("1 active, 1 completed"));
+
+    // Filter to completed
+    app.dispatch(TodoAction::SetFilter(Filter::Completed));
+    assert!(app.view().as_str().contains("[x] Buy milk"));
+    assert!(!app.view().as_str().contains("Write code")); // filtered out
+
+    // Empty state test - clear all and check empty message
+    app.dispatch(TodoAction::ClearCompleted);
+    app.dispatch(TodoAction::SetFilter(Filter::Completed));
+    assert!(app.view().as_str().contains("(no items)"));
+
+    println!("Composed view output:\n{}", app.view().as_str());
 }

@@ -1,0 +1,9 @@
+[package]
+name = "reducto-view"
+version = "0.1.0"
+edition = "2021"
+description = "View composition DSL for reducto"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+reducto-view-macros = { path = "../reducto-view-macros" }

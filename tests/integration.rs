@@ -176,14 +176,14 @@ impl View for TestAppView {
 
 #[test]
 fn app_new_creates_with_initial_state() {
-    let app: App<TestState, TestAction, TestReducer, CounterView> =
+    let app: App<TestReducer, CounterView> =
         App::new(CounterView::new(), TestState { count: 42 });
     assert_eq!(app.state().count, 42);
 }
 
 #[test]
 fn app_dispatch_updates_state() {
-    let mut app: App<TestState, TestAction, TestReducer, CounterView> =
+    let mut app: App<TestReducer, CounterView> =
         App::new(CounterView::new(), TestState::default());
 
     let effect = app.dispatch(TestAction::Increment);
@@ -194,7 +194,7 @@ fn app_dispatch_updates_state() {
 
 #[test]
 fn app_dispatch_returns_unchanged_when_state_unchanged() {
-    let mut app: App<TestState, TestAction, TestReducer, CounterView> =
+    let mut app: App<TestReducer, CounterView> =
         App::new(CounterView::new(), TestState { count: 5 });
 
     // Setting to same value should return Unchanged
@@ -207,7 +207,7 @@ fn app_dispatch_returns_unchanged_when_state_unchanged() {
 #[test]
 fn app_dispatch_renders_and_returns_effect() {
     let view = TestAppView::new();
-    let mut app: App<TestState, TestAction, TestReducer, _> =
+    let mut app: App<TestReducer, _> =
         App::new(view, TestState { count: 5 });
 
     let effect = app.dispatch(TestAction::Increment);
@@ -221,7 +221,7 @@ fn app_dispatch_renders_and_returns_effect() {
 #[test]
 fn app_unchanged_skips_render() {
     let view = TestAppView::new();
-    let mut app: App<TestState, TestAction, TestReducer, _> =
+    let mut app: App<TestReducer, _> =
         App::new(view, TestState { count: 10 });
 
     // Setting to same value returns unchanged - should NOT render
@@ -235,7 +235,7 @@ fn app_unchanged_skips_render() {
 #[test]
 fn app_processes_multiple_actions() {
     let view = TestAppView::new();
-    let mut app: App<TestState, TestAction, TestReducer, _> =
+    let mut app: App<TestReducer, _> =
         App::new(view, TestState::default());
 
     app.dispatch(TestAction::Increment);
@@ -253,7 +253,7 @@ fn app_processes_multiple_actions() {
 
 #[test]
 fn app_enqueue_adds_action_to_queue() {
-    let mut app: App<TestState, TestAction, TestReducer, CounterView> =
+    let mut app: App<TestReducer, CounterView> =
         App::new(CounterView::new(), TestState::default());
 
     assert!(app.enqueue(TestAction::Increment).is_ok());
@@ -265,7 +265,7 @@ fn app_enqueue_adds_action_to_queue() {
 
 #[test]
 fn app_enqueue_fails_when_queue_full() {
-    let mut app: App<TestState, TestAction, TestReducer, CounterView, 2> =
+    let mut app: App<TestReducer, CounterView, 2> =
         App::new(CounterView::new(), TestState::default());
 
     assert!(app.enqueue(TestAction::Increment).is_ok());
@@ -276,7 +276,7 @@ fn app_enqueue_fails_when_queue_full() {
 
 #[test]
 fn app_process_queue_dispatches_all_actions() {
-    let mut app: App<TestState, TestAction, TestReducer, CounterView> =
+    let mut app: App<TestReducer, CounterView> =
         App::new(CounterView::new(), TestState::default());
 
     app.enqueue(TestAction::Increment).unwrap();
@@ -292,7 +292,7 @@ fn app_process_queue_dispatches_all_actions() {
 
 #[test]
 fn app_process_queue_returns_effects() {
-    let mut app: App<TestState, TestAction, TestReducer, CounterView> =
+    let mut app: App<TestReducer, CounterView> =
         App::new(CounterView::new(), TestState { count: 5 });
 
     app.enqueue(TestAction::Increment).unwrap(); // 5 -> 6
@@ -309,74 +309,91 @@ fn app_process_queue_returns_effects() {
 }
 
 // ============================================================================
-// reducer! macro tests
+// Manual reducer implementation tests (replaces old reducer! macro tests)
 // ============================================================================
 
-// State for macro-generated reducer
 #[derive(Debug, Default)]
-struct MacroState {
+struct ManualState {
     value: i32,
     name: &'static str,
 }
 
-// Actions for macro-generated reducer
 #[derive(Clone, Debug)]
-enum MacroAction {
+enum ManualAction {
     Add(i32),
     Subtract(i32),
     SetName(&'static str),
     Reset,
 }
 
-// Generate reducer using macro - implicit effect returns
-reducto::reducer! {
-    MacroReducer for MacroState, MacroAction, TestEffect {
-        MacroAction::Add(n) => |state| state.value += n,
-        MacroAction::Subtract(n) => |state| state.value -= n,
-        MacroAction::SetName(s) => |state| state.name = s,
-        MacroAction::Reset => |state| *state = MacroState::default(),
+struct ManualReducer;
+
+impl Reducer for ManualReducer {
+    type State = ManualState;
+    type Action = ManualAction;
+    type Effect = TestEffect;
+
+    fn reduce(state: &mut Self::State, action: Self::Action) -> Self::Effect {
+        match action {
+            ManualAction::Add(n) => {
+                state.value += n;
+                TestEffect::None
+            }
+            ManualAction::Subtract(n) => {
+                state.value -= n;
+                TestEffect::None
+            }
+            ManualAction::SetName(s) => {
+                state.name = s;
+                TestEffect::None
+            }
+            ManualAction::Reset => {
+                *state = ManualState::default();
+                TestEffect::None
+            }
+        }
     }
 }
 
-struct MacroView;
-impl View for MacroView {
-    type State = MacroState;
+struct ManualView;
+impl View for ManualView {
+    type State = ManualState;
     fn render(&mut self, _state: &Self::State) {}
 }
 
 #[test]
 fn macro_reducer_handles_all_variants() {
-    let mut state = MacroState {
+    let mut state = ManualState {
         value: 10,
         name: "test",
     };
 
-    MacroReducer::reduce(&mut state, MacroAction::Add(5));
+    ManualReducer::reduce(&mut state, ManualAction::Add(5));
     assert_eq!(state.value, 15);
     assert_eq!(state.name, "test");
 
-    MacroReducer::reduce(&mut state, MacroAction::Subtract(3));
+    ManualReducer::reduce(&mut state, ManualAction::Subtract(3));
     assert_eq!(state.value, 12);
 
-    MacroReducer::reduce(&mut state, MacroAction::SetName("new"));
+    ManualReducer::reduce(&mut state, ManualAction::SetName("new"));
     assert_eq!(state.name, "new");
     assert_eq!(state.value, 12);
 
-    MacroReducer::reduce(&mut state, MacroAction::Reset);
+    ManualReducer::reduce(&mut state, ManualAction::Reset);
     assert_eq!(state.value, 0);
     assert_eq!(state.name, "");
 }
 
 #[test]
 fn macro_reducer_works_with_app() {
-    let mut app: App<MacroState, MacroAction, MacroReducer, MacroView> =
-        App::new(MacroView, MacroState::default());
+    let mut app: App<ManualReducer, ManualView> =
+        App::new(ManualView, ManualState::default());
 
-    let effect = app.dispatch(MacroAction::Add(42));
+    let effect = app.dispatch(ManualAction::Add(42));
     assert!(!effect.is_unchanged());
     assert_eq!(app.state().value, 42);
 
-    let effect = app.dispatch(MacroAction::SetName("hello"));
+    let effect = app.dispatch(ManualAction::SetName("hello"));
     assert!(!effect.is_unchanged());
     assert_eq!(app.state().name, "hello");
 }
@@ -454,7 +471,7 @@ impl View for MockView {
 
 #[test]
 fn custom_effects_signal_side_effects() {
-    let mut app: App<AppState, AppAction, AppReducer, MockView> = App::new(
+    let mut app: App<AppReducer, MockView> = App::new(
         MockView { buffer: TextView::new() },
         AppState::default(),
     );
@@ -477,7 +494,7 @@ fn custom_effects_signal_side_effects() {
 
 #[test]
 fn main_loop_handles_effects() {
-    let mut app: App<AppState, AppAction, AppReducer, MockView> = App::new(
+    let mut app: App<AppReducer, MockView> = App::new(
         MockView { buffer: TextView::new() },
         AppState::default(),
     );
@@ -509,7 +526,7 @@ fn main_loop_handles_effects() {
 
 #[test]
 fn queue_pattern_for_isr() {
-    let mut app: App<AppState, AppAction, AppReducer, MockView> = App::new(
+    let mut app: App<AppReducer, MockView> = App::new(
         MockView { buffer: TextView::new() },
         AppState::default(),
     );

@@ -16,8 +16,12 @@ std = []  # Enable std for testing
 heapless = "0.8"
 
 [dev-dependencies]
-# Tests run with std
+reducto-view = { path = "reducto-view" }
 
 [[test]]
 name = "integration"
 path = "tests/integration.rs"
+
+[[test]]
+name = "todo_app"
+path = "tests/todo_app.rs"

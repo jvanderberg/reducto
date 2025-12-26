@@ -11,12 +11,16 @@ categories = ["embedded", "no-std"]
 [features]
 default = []
 std = []  # Enable std for testing
+embassy = ["dep:embassy-sync", "dep:critical-section"]
 
 [dependencies]
 heapless = "0.8"
+embassy-sync = { version = "0.6", optional = true }
+critical-section = { version = "1.2", optional = true }
 
 [dev-dependencies]
 reducto-view = { path = "reducto-view" }
+critical-section = { version = "1.2", features = ["std"] }
 
 [[test]]
 name = "integration"
@@ -25,3 +29,8 @@ path = "tests/integration.rs"
 [[test]]
 name = "todo_app"
 path = "tests/todo_app.rs"
+
+[[test]]
+name = "channel"
+path = "tests/channel.rs"
+required-features = ["embassy"]

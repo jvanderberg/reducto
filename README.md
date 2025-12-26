@@ -125,27 +125,72 @@ impl Reducer for AppReducer {
 }
 ```
 
-## Two Dispatch Patterns
+## Dispatch Patterns
 
-### Direct Dispatch (async runtimes)
+### ActionChannel (embassy)
 
-For embassy or RTIC where actions come through channels:
+For embassy-based applications, enable the `embassy` feature for an async-friendly channel:
+
+```toml
+reducto = { version = "0.1", features = ["embassy"] }
+embassy-executor = { version = "0.7", features = ["arch-cortex-m"] }
+```
 
 ```rust
-loop {
-    let action = ACTION_CHANNEL.receive().await;
-    let effect = app.dispatch(action);
+use reducto::{App, ActionChannel};
 
-    match effect {
-        AppEffect::Save => storage::save(app.state()),
-        _ => {}
+// Static channel - ISR-safe
+static ACTIONS: ActionChannel<Action, 8> = ActionChannel::new();
+
+// Interrupt handler - fast, just enqueue
+#[interrupt]
+fn BUTTON_IRQ() {
+    ACTIONS.try_send(Action::ButtonPressed).ok();
+}
+
+// Main loop with async/await
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    let mut app = App::new(MyView::new(), MyState::default());
+
+    loop {
+        let action = ACTIONS.receive().await;
+        let effect = app.dispatch(action);
+
+        match effect {
+            AppEffect::Save => storage::save(app.state()),
+            _ => {}
+        }
     }
 }
 ```
 
-### Queue Dispatch (bare-metal ISRs)
+**ActionChannel API:**
+| Method | Blocking | Use Case |
+|--------|----------|----------|
+| `try_send()` | No | ISRs - never blocks |
+| `send().await` | Async | Tasks - waits if full |
+| `try_receive()` | No | Polling |
+| `receive().await` | Async | Main loop - waits for action |
 
-For interrupt handlers where you need fast enqueue and deferred processing:
+### Direct Dispatch (polling)
+
+For simple polling or single-threaded code without async:
+
+```rust
+let mut app = App::new(MyView::new(), MyState::default());
+
+loop {
+    if let Some(action) = poll_for_action() {
+        let effect = app.dispatch(action);
+        // handle effect...
+    }
+}
+```
+
+### Built-in Queue (bare-metal without embassy)
+
+For bare-metal ISRs without embassy, use the built-in queue:
 
 ```rust
 // In ISR (fast - just enqueue):
@@ -153,30 +198,13 @@ critical_section::with(|cs| {
     APP.borrow_ref_mut(cs).enqueue(Action::ButtonPressed).ok();
 });
 
-// In main loop (process all queued actions):
-loop {
-    // Wait for interrupt...
-
-    critical_section::with(|cs| {
-        let effects = APP.borrow_ref_mut(cs).process_queue();
-        for effect in effects {
-            match effect {
-                AppEffect::Save => storage::save(&APP.borrow_ref(cs).state()),
-                _ => {}
-            }
-        }
-    });
-}
+// In main loop:
+critical_section::with(|cs| {
+    for effect in APP.borrow_ref_mut(cs).process_queue() {
+        // handle effect...
+    }
+});
 ```
-
-**When to use the queue:**
-- ISRs should be fast - `enqueue()` just pushes to a queue and returns
-- Calling `dispatch()` from an ISR would run the reducer and render, blocking other interrupts
-- The queue defers processing to the main loop where timing is less critical
-
-**When to use direct dispatch:**
-- Async runtimes (embassy) already have channels that act as queues
-- Single-threaded code where actions come from polling
 
 ## View Composition (Optional)
 

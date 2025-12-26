@@ -69,6 +69,12 @@
 use core::marker::PhantomData;
 use heapless::String;
 
+#[cfg(feature = "embassy")]
+mod channel;
+
+#[cfg(feature = "embassy")]
+pub use channel::ActionChannel;
+
 /// Trait for reducer return types that indicate side effects.
 ///
 /// Implement this trait on your effect enum to tell the framework

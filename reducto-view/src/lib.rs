@@ -16,4 +16,6 @@
 //! }
 //! ```
 
+#![no_std]
+
 pub use reducto_view_macros::view;

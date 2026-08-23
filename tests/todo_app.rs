@@ -178,7 +178,12 @@ impl View for TodoView {
         let active_count = state.todos.iter().filter(|t| !t.completed).count();
         let completed_count = state.todos.iter().filter(|t| t.completed).count();
         writeln!(buf, "----------------").ok();
-        writeln!(buf, "{} active, {} completed", active_count, completed_count).ok();
+        writeln!(
+            buf,
+            "{} active, {} completed",
+            active_count, completed_count
+        )
+        .ok();
     }
 }
 
@@ -188,8 +193,7 @@ impl View for TodoView {
 
 #[test]
 fn todo_app_full_workflow() {
-    let mut app: App<TodoReducer, TodoView> =
-        App::new(TodoView::new(), TodoState::default());
+    let mut app: App<TodoReducer, TodoView> = App::new(TodoView::new(), TodoState::default());
 
     // Initial state - add an empty task (no-op) to check initial behavior
     let empty = heapless::String::<32>::new();
@@ -267,8 +271,7 @@ fn todo_app_full_workflow() {
 
 #[test]
 fn todo_app_with_queue() {
-    let mut app: App<TodoReducer, TodoView> =
-        App::new(TodoView::new(), TodoState::default());
+    let mut app: App<TodoReducer, TodoView> = App::new(TodoView::new(), TodoState::default());
 
     // Simulate ISR-style: enqueue multiple actions
     let mut t1 = heapless::String::<32>::new();
@@ -294,8 +297,7 @@ fn todo_app_with_queue() {
 
 #[test]
 fn todo_app_with_app() {
-    let mut app: App<TodoReducer, TodoView> =
-        App::new(TodoView::new(), TodoState::default());
+    let mut app: App<TodoReducer, TodoView> = App::new(TodoView::new(), TodoState::default());
 
     // Add tasks - App handles rendering internally
     let mut text = heapless::String::<32>::new();
@@ -479,7 +481,12 @@ impl Footer {
         let active_count = state.todos.iter().filter(|t| !t.completed).count();
         let completed_count = state.todos.iter().filter(|t| t.completed).count();
         writeln!(display, "----------------").ok();
-        writeln!(display, "{} active, {} completed", active_count, completed_count).ok();
+        writeln!(
+            display,
+            "{} active, {} completed",
+            active_count, completed_count
+        )
+        .ok();
     }
 }
 

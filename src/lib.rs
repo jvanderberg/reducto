@@ -163,7 +163,6 @@ pub trait Reducer {
     fn reduce(state: &mut Self::State, action: Self::Action) -> Self::Effect;
 }
 
-
 /// View renders state to some output.
 ///
 /// Views own their internal buffer and handle rendering. For hardware displays,
@@ -401,4 +400,3 @@ where
         &mut self.view
     }
 }
-

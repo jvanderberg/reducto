@@ -176,15 +176,13 @@ impl View for TestAppView {
 
 #[test]
 fn app_new_creates_with_initial_state() {
-    let app: App<TestReducer, CounterView> =
-        App::new(CounterView::new(), TestState { count: 42 });
+    let app: App<TestReducer, CounterView> = App::new(CounterView::new(), TestState { count: 42 });
     assert_eq!(app.state().count, 42);
 }
 
 #[test]
 fn app_dispatch_updates_state() {
-    let mut app: App<TestReducer, CounterView> =
-        App::new(CounterView::new(), TestState::default());
+    let mut app: App<TestReducer, CounterView> = App::new(CounterView::new(), TestState::default());
 
     let effect = app.dispatch(TestAction::Increment);
 
@@ -207,8 +205,7 @@ fn app_dispatch_returns_unchanged_when_state_unchanged() {
 #[test]
 fn app_dispatch_renders_and_returns_effect() {
     let view = TestAppView::new();
-    let mut app: App<TestReducer, _> =
-        App::new(view, TestState { count: 5 });
+    let mut app: App<TestReducer, _> = App::new(view, TestState { count: 5 });
 
     let effect = app.dispatch(TestAction::Increment);
 
@@ -221,8 +218,7 @@ fn app_dispatch_renders_and_returns_effect() {
 #[test]
 fn app_unchanged_skips_render() {
     let view = TestAppView::new();
-    let mut app: App<TestReducer, _> =
-        App::new(view, TestState { count: 10 });
+    let mut app: App<TestReducer, _> = App::new(view, TestState { count: 10 });
 
     // Setting to same value returns unchanged - should NOT render
     let effect = app.dispatch(TestAction::Set(10));
@@ -235,8 +231,7 @@ fn app_unchanged_skips_render() {
 #[test]
 fn app_processes_multiple_actions() {
     let view = TestAppView::new();
-    let mut app: App<TestReducer, _> =
-        App::new(view, TestState::default());
+    let mut app: App<TestReducer, _> = App::new(view, TestState::default());
 
     app.dispatch(TestAction::Increment);
     app.dispatch(TestAction::Increment);
@@ -253,8 +248,7 @@ fn app_processes_multiple_actions() {
 
 #[test]
 fn app_enqueue_adds_action_to_queue() {
-    let mut app: App<TestReducer, CounterView> =
-        App::new(CounterView::new(), TestState::default());
+    let mut app: App<TestReducer, CounterView> = App::new(CounterView::new(), TestState::default());
 
     assert!(app.enqueue(TestAction::Increment).is_ok());
     assert!(app.enqueue(TestAction::Increment).is_ok());
@@ -276,8 +270,7 @@ fn app_enqueue_fails_when_queue_full() {
 
 #[test]
 fn app_process_queue_dispatches_all_actions() {
-    let mut app: App<TestReducer, CounterView> =
-        App::new(CounterView::new(), TestState::default());
+    let mut app: App<TestReducer, CounterView> = App::new(CounterView::new(), TestState::default());
 
     app.enqueue(TestAction::Increment).unwrap();
     app.enqueue(TestAction::Increment).unwrap();
@@ -296,15 +289,15 @@ fn app_process_queue_returns_effects() {
         App::new(CounterView::new(), TestState { count: 5 });
 
     app.enqueue(TestAction::Increment).unwrap(); // 5 -> 6
-    app.enqueue(TestAction::Set(6)).unwrap();    // 6 -> 6, unchanged
-    app.enqueue(TestAction::Set(100)).unwrap();  // 6 -> 100
+    app.enqueue(TestAction::Set(6)).unwrap(); // 6 -> 6, unchanged
+    app.enqueue(TestAction::Set(100)).unwrap(); // 6 -> 100
 
     let effects = app.process_queue();
 
     assert_eq!(effects.len(), 3);
-    assert_eq!(effects[0], TestEffect::None);      // Increment
+    assert_eq!(effects[0], TestEffect::None); // Increment
     assert_eq!(effects[1], TestEffect::Unchanged); // Set(6) when count=6
-    assert_eq!(effects[2], TestEffect::None);      // Set(100)
+    assert_eq!(effects[2], TestEffect::None); // Set(100)
     assert_eq!(app.state().count, 100);
 }
 
@@ -386,8 +379,7 @@ fn macro_reducer_handles_all_variants() {
 
 #[test]
 fn macro_reducer_works_with_app() {
-    let mut app: App<ManualReducer, ManualView> =
-        App::new(ManualView, ManualState::default());
+    let mut app: App<ManualReducer, ManualView> = App::new(ManualView, ManualState::default());
 
     let effect = app.dispatch(ManualAction::Add(42));
     assert!(!effect.is_unchanged());
@@ -472,7 +464,9 @@ impl View for MockView {
 #[test]
 fn custom_effects_signal_side_effects() {
     let mut app: App<AppReducer, MockView> = App::new(
-        MockView { buffer: TextView::new() },
+        MockView {
+            buffer: TextView::new(),
+        },
         AppState::default(),
     );
 
@@ -495,7 +489,9 @@ fn custom_effects_signal_side_effects() {
 #[test]
 fn main_loop_handles_effects() {
     let mut app: App<AppReducer, MockView> = App::new(
-        MockView { buffer: TextView::new() },
+        MockView {
+            buffer: TextView::new(),
+        },
         AppState::default(),
     );
 
@@ -527,7 +523,9 @@ fn main_loop_handles_effects() {
 #[test]
 fn queue_pattern_for_isr() {
     let mut app: App<AppReducer, MockView> = App::new(
-        MockView { buffer: TextView::new() },
+        MockView {
+            buffer: TextView::new(),
+        },
         AppState::default(),
     );
 

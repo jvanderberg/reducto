@@ -105,6 +105,18 @@ fn view_receives_exact_old_and_new_state() {
     assert_eq!(app.view().new_count, 42);
 }
 
+#[test]
+fn mutable_view_access_services_deferred_view_work() {
+    let mut app: App<TestReducer, TestView> = App::new(TestView::new(), State::default());
+    app.view_mut().transitions = 7;
+    assert_eq!(app.view().transitions, 7);
+
+    let mut effect_app: EffectApp<TestReducer, TestView, CountEffect> =
+        EffectApp::new(TestView::new(), State::default());
+    effect_app.view_mut().transitions = 9;
+    assert_eq!(effect_app.view().transitions, 9);
+}
+
 struct CountEffect;
 
 impl TransitionEffect<State> for CountEffect {

@@ -211,6 +211,12 @@ where
     pub fn view(&self) -> &V {
         &self.view
     }
+
+    /// Mutably access the view for scheduler-driven work such as draining a
+    /// deferred render queue after dispatch returns.
+    pub fn view_mut(&mut self) -> &mut V {
+        &mut self.view
+    }
 }
 
 /// An application whose every dispatch plans a typed external effect.
@@ -258,5 +264,12 @@ where
 
     pub fn view(&self) -> &V {
         self.app.view()
+    }
+
+    /// Mutably access the view without bypassing reducer or effect handling.
+    /// This is intended for servicing work that the view deferred during
+    /// `render` or `render_transition`.
+    pub fn view_mut(&mut self) -> &mut V {
+        self.app.view_mut()
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "reducto"
-version = "0.1.1"
+version = "0.1.0"
 edition = "2021"
 description = "A no_std Redux-like state management framework for embedded systems"
 license = "MIT"

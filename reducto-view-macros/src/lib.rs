@@ -1,7 +1,7 @@
 use proc_macro::TokenStream;
 
-mod parse;
 mod codegen;
+mod parse;
 
 /// View composition macro.
 ///

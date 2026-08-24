@@ -3,7 +3,9 @@ name = "reducto-view"
 version = "0.1.0"
 edition = "2021"
 description = "View composition DSL for reducto"
-license = "MIT OR Apache-2.0"
+license = "MIT"
+repository = "https://github.com/jvanderberg/reducto"
+rust-version = "1.81"
 
 [dependencies]
-reducto-view-macros = { path = "../reducto-view-macros" }
+reducto-view-macros = { version = "0.1.0", path = "../reducto-view-macros" }

@@ -11,40 +11,22 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
-//! use reducto::{App, ActionChannel};
+//! ```rust
+//! use reducto::ActionChannel;
+//!
+//! enum Action { ButtonPressed, Tick }
 //!
 //! // Static channel - lives for the entire program
 //! static ACTIONS: ActionChannel<Action, 8> = ActionChannel::new();
 //!
-//! // Interrupt handler - fast, just enqueue
-//! #[interrupt]
-//! fn BUTTON_IRQ() {
+//! // Call from an interrupt handler: bounded and non-blocking.
+//! fn button_irq() {
 //!     // try_send is non-blocking and ISR-safe
 //!     ACTIONS.try_send(Action::ButtonPressed).ok();
 //! }
 //!
-//! #[interrupt]
-//! fn TIMER_IRQ() {
-//!     ACTIONS.try_send(Action::Tick).ok();
-//! }
-//!
-//! // Main loop - process actions with async/await
-//! #[embassy_executor::main]
-//! async fn main(_spawner: Spawner) {
-//!     let mut app = App::new(MyView::new(), MyState::default());
-//!
-//!     loop {
-//!         // Awaits until an action is available
-//!         let action = ACTIONS.receive().await;
-//!         let effect = app.dispatch(action);
-//!
-//!         match effect {
-//!             AppEffect::Save => storage::save(app.state()),
-//!             AppEffect::Beep => buzzer::beep(),
-//!             _ => {}
-//!         }
-//!     }
+//! async fn next_action() -> Action {
+//!     ACTIONS.receive().await
 //! }
 //! ```
 //!
@@ -63,12 +45,14 @@
 //! actions faster than the main loop consumes them, `try_send()` will fail
 //! when the channel is full. Size accordingly:
 //!
-//! ```rust,ignore
+//! ```rust
+//! use reducto::ActionChannel;
+//!
 //! // Small - for low-frequency events
-//! static ACTIONS: ActionChannel<Action, 4> = ActionChannel::new();
+//! static ACTIONS: ActionChannel<u8, 4> = ActionChannel::new();
 //!
 //! // Larger - for burst-heavy workloads
-//! static ACTIONS: ActionChannel<Action, 32> = ActionChannel::new();
+//! static BURST_ACTIONS: ActionChannel<u8, 32> = ActionChannel::new();
 //! ```
 //!
 //! # Dependencies
@@ -101,7 +85,7 @@ use embassy_sync::channel::Channel;
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust
 /// use reducto::ActionChannel;
 ///
 /// #[derive(Clone)]
@@ -113,10 +97,13 @@ use embassy_sync::channel::Channel;
 ///
 /// static ACTIONS: ActionChannel<Action, 8> = ActionChannel::new();
 ///
-/// // From ISR:
-/// ACTIONS.try_send(Action::Increment).ok();
+/// // From an ISR:
+/// fn interrupt_handler() {
+///     ACTIONS.try_send(Action::Increment).ok();
+/// }
 ///
-/// // From async main:
-/// let action = ACTIONS.receive().await;
+/// async fn receive_action() -> Action {
+///     ACTIONS.receive().await
+/// }
 /// ```
 pub type ActionChannel<A, const N: usize> = Channel<CriticalSectionRawMutex, A, N>;

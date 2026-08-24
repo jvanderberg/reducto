@@ -3,7 +3,9 @@ name = "reducto-view-macros"
 version = "0.1.0"
 edition = "2021"
 description = "Proc-macro for reducto view composition"
-license = "MIT OR Apache-2.0"
+license = "MIT"
+repository = "https://github.com/jvanderberg/reducto"
+rust-version = "1.81"
 
 [lib]
 proc-macro = true

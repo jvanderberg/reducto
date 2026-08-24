@@ -3,10 +3,13 @@ name = "reducto"
 version = "0.1.0"
 edition = "2021"
 description = "A no_std Redux-like state management framework for embedded systems"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/joshvera/reducto"
+license = "MIT"
+repository = "https://github.com/jvanderberg/reducto"
+documentation = "https://docs.rs/reducto"
+rust-version = "1.81"
 keywords = ["embedded", "no_std", "redux", "state-management"]
 categories = ["embedded", "no-std"]
+exclude = ["reducto-view/", "reducto-view-macros/", "todo.md"]
 
 [features]
 default = []
@@ -19,8 +22,11 @@ embassy-sync = { version = "0.6", optional = true }
 critical-section = { version = "1.2", optional = true }
 
 [dev-dependencies]
-reducto-view = { path = "reducto-view" }
 critical-section = { version = "1.2", features = ["std"] }
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu"]
 
 [[test]]
 name = "integration"

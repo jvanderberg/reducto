@@ -2,8 +2,8 @@ use proc_macro2::Span;
 use syn::{
     braced,
     parse::{Parse, ParseStream},
-    Expr, Ident, Pat, Token, Type, TypeParamBound,
     punctuated::Punctuated,
+    Expr, Ident, Pat, Token, Type, TypeParamBound,
 };
 
 /// Root AST node for the view! macro

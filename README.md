@@ -1,244 +1,106 @@
 # Reducto
 
-A `no_std` Redux-like state management framework for embedded systems.
+A `no_std`, Redux-style state container for embedded Rust.
 
-## Features
+The normative design, prohibitions, embedded constraints, and review checklist
+are in [docs/reactive_architecture.md](docs/reactive_architecture.md). In short:
 
-- **Mutable reducers** - In-place state mutation, no cloning required
-- **Explicit effects** - Reducer returns side effects for the main loop to handle
-- **Exhaustive matching** - Rust's type system enforces handling all action variants
-- **Built-in action queue** - ISR-safe enqueueing with deferred processing
-- **Zero-copy** - State is never cloned, mutated in place
-
-## Quick Start
+- one application state is the source of truth;
+- immutable actions describe events;
+- a pure reducer returns new state and performs no I/O;
+- dispatch compares complete old/new state values, so no-op detection cannot be
+  broken by a forgotten version bump;
+- dispatch supplies exact old/new state to transition consumers;
+- views compare old/new displayed projections and update only changed widgets;
+- hardware side effects compare old/new semantic state outside the reducer.
 
 ```rust
-use reducto::{App, Effect, Reducer, View, TextView};
 use core::fmt::Write;
+use reducto::{EffectApp, Reducer, TextView, TransitionEffect, View};
 
-// Define your state
-#[derive(Default)]
-struct AppState { count: i32 }
-
-// Define your actions
-enum Action { Increment, Decrement }
-
-// Define your effects
-#[derive(Clone, Copy)]
-enum AppEffect { None, Unchanged }
-
-impl Effect for AppEffect {
-    fn is_unchanged(&self) -> bool {
-        matches!(self, AppEffect::Unchanged)
-    }
-    fn changed() -> Self { AppEffect::None }
+#[derive(Clone, Default, PartialEq)]
+struct State {
+    count: i32,
 }
 
-// Define your reducer
+enum Action { Increment, Set(i32) }
+
 struct AppReducer;
 
 impl Reducer for AppReducer {
-    type State = AppState;
+    type State = State;
     type Action = Action;
-    type Effect = AppEffect;
 
-    fn reduce(state: &mut Self::State, action: Self::Action) -> Self::Effect {
+    fn reduce(old: &State, action: Action) -> State {
+        let mut new = old.clone();
         match action {
-            Action::Increment => state.count += 1,
-            Action::Decrement => state.count -= 1,
+            Action::Increment => new.count += 1,
+            Action::Set(value) if value == old.count => return new,
+            Action::Set(value) => new.count = value,
         }
-        AppEffect::None
+        new
     }
 }
 
-// Define your view
-struct AppView { buffer: TextView<64> }
+struct AppView(TextView<64>);
 
 impl View for AppView {
-    type State = AppState;
-    fn render(&mut self, state: &Self::State) {
-        self.buffer.clear();
-        write!(self.buffer.buffer_mut(), "Count: {}", state.count).ok();
+    type State = State;
+
+    fn render(&mut self, state: &State) {
+        self.0.clear();
+        write!(self.0.buffer_mut(), "Count: {}", state.count).ok();
+    }
+
+    fn render_transition(&mut self, old: &State, new: &State) {
+        if old.count != new.count {
+            self.render(new);
+        }
     }
 }
 
-// Create and use your app
-let mut app: App<AppReducer, AppView> = App::new(
-    AppView { buffer: TextView::new() },
-    AppState::default(),
-);
-app.dispatch(Action::Increment);
+struct PersistCount;
+
+impl TransitionEffect<State> for PersistCount {
+    type Effect = i32;
+
+    fn plan(old: &State, new: &State) -> Option<i32> {
+        (old.count != new.count).then_some(new.count)
+    }
+}
+
+let mut app: EffectApp<AppReducer, AppView, PersistCount> =
+    EffectApp::new(AppView(TextView::new()), State::default());
+app.render_full();
+let outcome = app.dispatch(Action::Increment);
+assert!(outcome.changed());
+assert_eq!(outcome.effect(), Some(1));
 assert_eq!(app.state().count, 1);
 ```
 
-## Effects
+`App::enqueue` is a bounded foreground queue and requires `&mut App`; it is not
+an ISR-safe API. ISR producers should use the optional `ActionChannel` with the
+`embassy` feature, or a platform-specific critical-section queue. After actions
+reach the foreground, `process_queue` renders each real transition and
+`process_queue_coalesced` reduces the batch into one old/final transition.
 
-Effects signal side effects to the main loop. The framework uses `is_unchanged()` for render skipping - all other variants are for your main loop to handle.
+Use `EffectApp` and `TransitionEffect`, as above, when hardware or persistence
+work must observe every old/new transition. `EffectApp` has no plain dispatch
+path that can bypass planning. Consume `outcome.effect()` only after dispatch
+returns.
 
-```rust
-#[derive(Clone, Copy)]
-enum AppEffect {
-    Unchanged,  // Skip render
-    None,       // Render only
-    Save,       // Render + save to storage
-}
+Reducers and effect planners must remain deterministic and free of I/O. Effect
+values are executed by the caller only after dispatch returns.
 
-impl Effect for AppEffect {
-    fn is_unchanged(&self) -> bool {
-        matches!(self, AppEffect::Unchanged)
-    }
-    fn changed() -> Self {
-        AppEffect::None
-    }
-}
-```
+Reducers return owned state values, so each action generally clones or rebuilds
+the state. This favors simple, auditable old/new semantics. For very large or
+high-rate state, use structural sharing or keep raw sample streams outside the
+application state. `PartialEq` must represent application truth; avoid raw
+floating-point fields whose `NaN` values are not equal to themselves.
 
-## Reducer Implementation
-
-Reducers mutate state and return an effect. Rust's exhaustive match ensures all actions are handled:
-
-```rust
-impl Reducer for AppReducer {
-    type State = AppState;
-    type Action = Action;
-    type Effect = AppEffect;
-
-    fn reduce(state: &mut Self::State, action: Self::Action) -> Self::Effect {
-        match action {
-            Action::Increment => {
-                state.count += 1;
-                AppEffect::None
-            }
-            Action::SetValue(v) if v == state.value => {
-                AppEffect::Unchanged  // No change, skip render
-            }
-            Action::SetValue(v) => {
-                state.value = v;
-                AppEffect::Save  // Persist this change
-            }
-            Action::Reset => {
-                *state = AppState::default();
-                AppEffect::None
-            }
-        }
-    }
-}
-```
-
-## Dispatch Patterns
-
-### ActionChannel (embassy)
-
-For embassy-based applications, enable the `embassy` feature for an async-friendly channel:
-
-```toml
-reducto = { version = "0.1", features = ["embassy"] }
-embassy-executor = { version = "0.7", features = ["arch-cortex-m"] }
-```
-
-```rust
-use reducto::{App, ActionChannel};
-
-// Static channel - ISR-safe
-static ACTIONS: ActionChannel<Action, 8> = ActionChannel::new();
-
-// Interrupt handler - fast, just enqueue
-#[interrupt]
-fn BUTTON_IRQ() {
-    ACTIONS.try_send(Action::ButtonPressed).ok();
-}
-
-// Main loop with async/await
-#[embassy_executor::main]
-async fn main(_spawner: Spawner) {
-    let mut app = App::new(MyView::new(), MyState::default());
-
-    loop {
-        let action = ACTIONS.receive().await;
-        let effect = app.dispatch(action);
-
-        match effect {
-            AppEffect::Save => storage::save(app.state()),
-            _ => {}
-        }
-    }
-}
-```
-
-**ActionChannel API:**
-| Method | Blocking | Use Case |
-|--------|----------|----------|
-| `try_send()` | No | ISRs - never blocks |
-| `send().await` | Async | Tasks - waits if full |
-| `try_receive()` | No | Polling |
-| `receive().await` | Async | Main loop - waits for action |
-
-### Direct Dispatch (polling)
-
-For simple polling or single-threaded code without async:
-
-```rust
-let mut app = App::new(MyView::new(), MyState::default());
-
-loop {
-    if let Some(action) = poll_for_action() {
-        let effect = app.dispatch(action);
-        // handle effect...
-    }
-}
-```
-
-### Built-in Queue (bare-metal without embassy)
-
-For bare-metal ISRs without embassy, use the built-in queue:
-
-```rust
-// In ISR (fast - just enqueue):
-critical_section::with(|cs| {
-    APP.borrow_ref_mut(cs).enqueue(Action::ButtonPressed).ok();
-});
-
-// In main loop:
-critical_section::with(|cs| {
-    for effect in APP.borrow_ref_mut(cs).process_queue() {
-        // handle effect...
-    }
-});
-```
-
-## View Composition (Optional)
-
-The `reducto-view` crate provides a macro for declarative view composition:
-
-```rust
-use reducto_view::view;
-
-view! {
-    AppView<D: Write> for AppState {
-        <Header />
-        @if state.loading { <Spinner /> } @else { <Content /> }
-        @match state.screen {
-            Screen::Home => <HomeScreen />,
-            Screen::Settings => <SettingsScreen />,
-        }
-        <Footer />
-    }
-}
-```
-
-Components are structs with a `render` method:
-
-```rust
-struct Header;
-impl Header {
-    fn render<D: Write>(display: &mut D, state: &AppState) {
-        writeln!(display, "=== {} ===", state.title).ok();
-    }
-}
-```
-
-See `reducto-view` crate for details.
+The optional `embassy` feature exposes `ActionChannel` for async applications.
+The view-macro experiments in this repository are not part of the 0.1 release.
 
 ## License
 
-MIT OR Apache-2.0
+MIT

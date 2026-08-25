@@ -6,7 +6,7 @@ This document is the normative architecture contract for Reducto and its
 applications. Code that conflicts with it is an architectural defect, even if
 it appears to work on current hardware.
 
-Reducto follows the PocketPD reactive architecture: one state tree, immutable
+Reducto follows a Redux-style reactive architecture: one state tree, immutable
 actions, a pure reducer, old/new-state side effects, and state-derived views.
 For slow embedded displays, Reducto additionally passes both old and new state
 to the view. This lets the view perform exact, local change detection without
@@ -180,29 +180,30 @@ must preserve these properties:
 - Slow display work is split into the smallest useful changed widgets.
 - A full render is explicit and reserved for initialization, view changes, or
   recovery from lost display contents.
-- Firmware startup must preserve product-specific bootloader recovery. For
-  BenchVolt, the application invalidates only the boot metadata page before
-  other initialization so a power cycle returns to the stock bootloader.
+- Firmware startup must preserve the product's recovery path. If the platform
+  ships a resident bootloader, the application should touch only the minimal
+  boot metadata it owns so a power cycle can still return to recovery mode.
 - Navigation work may be brought up before output control, but read-only UI
   actions must remain structurally incapable of enabling hardware.
 
-## BenchVolt projection rules
+## Case study: projection rules in an instrument UI
 
-BenchVolt validates selective rendering using exactly what the screen shows:
+A bench power supply firmware built on this architecture validates selective
+rendering by comparing exactly what the screen shows:
 
-- Temperature compares validity plus the formatted one-decimal Celsius
-  value, not raw ADC counts.
-- Voltage and current compare their displayed scaled integers, not hidden lower
+- Temperature compares validity plus the formatted one-decimal value, not raw
+  ADC counts.
+- Measured readings compare their displayed scaled integers, not hidden lower
   precision bits.
-- Channel status compares the displayed status category (`FAULT`, `ON`, `WAIT`,
-  or `OFF`), not every internal enum discriminant when the text/color is equal.
+- Channel status compares the displayed status category (for example `FAULT`,
+  `ON`, `WAIT`, or `OFF`), not every internal enum discriminant when the
+  text/color is equal.
 - Setpoint and limit fields compare their displayed scaled values.
-- Each channel field is an independent widget. A voltage change must not clear
-  or redraw current, setpoint, limit, channel number, status, or the rest of its
-  row.
-- Recovery/header status is independently repaintable.
-- If none of those projections changes, `render_transition` performs no SPI
-  writes even when application state changed.
+- Each channel field is an independent widget. A change in one reading must not
+  clear or redraw the other fields in its row.
+- Header/status areas are independently repaintable.
+- If none of those projections changes, `render_transition` performs no display
+  bus writes even when application state changed.
 
 Each widget comparison and its rectangle live together in the view. This keeps
 formatting and layout cohesive and keeps the reducer display-agnostic.
@@ -222,7 +223,7 @@ Every application should test at least:
 9. Sustained rendering does not break or starve USB CDC traffic.
 10. The target's bootloader recovery mechanism still works after flashing.
 
-## Learnings captured from BenchVolt
+## Learnings from production use
 
 - A state change and a visible change are different facts. State equality
   answers the first; the view's projection comparison answers the second.
@@ -232,14 +233,14 @@ Every application should test at least:
   and rendering. Old/new transition observers express those concerns directly.
 - A cached `ViewState` duplicates application truth and creates invalidation
   bugs. Supplying old/new state makes that cache unnecessary.
-- Full-screen redraws are visibly slow on the ST7789 and can delay foreground
-  command handling. Partial widget redraws are both a UI quality requirement and
-  a responsiveness requirement.
+- Full-screen redraws are visibly slow on small SPI displays and can delay
+  foreground command handling. Partial widget redraws are both a UI quality
+  requirement and a responsiveness requirement.
 - USB correctness cannot rely on a fast main loop. The USB stack must retain
   interrupt service and bounded queues even while foreground rendering is slow.
 - Device recovery is part of firmware correctness, not merely a flashing
-  procedure. BenchVolt images must never erase or rewrite the stock bootloader,
-  option bytes, protection state, or unrelated flash pages.
+  procedure. Application images should never erase or rewrite a resident
+  bootloader, protection configuration, or unrelated flash regions.
 
 ## Review checklist
 

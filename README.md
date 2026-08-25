@@ -3,7 +3,7 @@
 A `no_std`, Redux-style state container for embedded Rust.
 
 The normative design, prohibitions, embedded constraints, and review checklist
-are in [docs/reactive_architecture.md](docs/reactive_architecture.md). In short:
+are in [docs/reactive_architecture.md](https://github.com/jvanderberg/reducto/blob/main/docs/reactive_architecture.md). In short:
 
 - one application state is the source of truth;
 - immutable actions describe events;

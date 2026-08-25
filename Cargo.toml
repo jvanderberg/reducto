@@ -9,7 +9,7 @@ documentation = "https://docs.rs/reducto"
 rust-version = "1.81"
 keywords = ["embedded", "no_std", "redux", "state-management"]
 categories = ["embedded", "no-std"]
-exclude = ["reducto-view/", "reducto-view-macros/", "todo.md"]
+exclude = ["reducto-view/", "reducto-view-macros/"]
 
 [features]
 default = []
